@@ -297,7 +297,7 @@ app.post(['/api/move', '/api/files/move'], (req, res) => {
     }
 });
 
-// API Mở file bằng ứng dụng chuyên dụng trên máy tính
+// API Mở file bằng ứng dụng chuyên dụng trực tiếp trên máy chủ VPS
 app.post(['/api/open-local', '/api/files/open', '/api/open'], (req, res) => {
     const { path: itemPath } = req.body;
     if (!itemPath) return res.status(400).json({ error: 'Cần truyền đường dẫn tệp tin' });
@@ -310,7 +310,6 @@ app.post(['/api/open-local', '/api/files/open', '/api/open'], (req, res) => {
 
         let command = '';
         if (process.platform === 'win32') {
-            // Chuẩn hóa đường dẫn Windows dạng gạch ngược \ và bọc ngoặc kép an toàn
             const winPath = path.normalize(absPath).replace(/\//g, '\\');
             command = `start "" "${winPath}"`;
         } else if (process.platform === 'darwin') {
@@ -319,14 +318,14 @@ app.post(['/api/open-local', '/api/files/open', '/api/open'], (req, res) => {
             command = `xdg-open "${absPath}"`;
         }
 
-        console.log(`[EXEC COMMAND]: ${command}`);
+        console.log(`[EXEC COMMAND ON SERVER]: ${command}`);
 
         exec(command, (err) => {
             if (err) {
-                console.error('Lỗi khi kích hoạt phần mềm mở tệp:', err);
-                return res.status(500).json({ error: 'Không thể mở tệp: ' + err.message });
+                console.error('Lỗi khi kích hoạt phần mềm mở tệp trên Server:', err);
+                return res.status(500).json({ error: 'Không thể mở tệp trên Server: ' + err.message });
             }
-            res.json({ success: true, message: 'Đã phát lệnh mở tệp trên hệ thống thành công' });
+            res.json({ success: true, message: 'Đã phát lệnh mở tệp trên hệ thống Server thành công' });
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -359,8 +358,10 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 });
 
 app.use(express.static(__dirname));
+
 // Phục vụ tĩnh trực tiếp từ thư mục ROOT_DIR (database/bim-vdc)
 app.use('/files', express.static(ROOT_DIR));
+app.use('/database/bim-vdc', express.static(ROOT_DIR));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`CDE Server sẵn sàng tại http://localhost:${PORT}`));
