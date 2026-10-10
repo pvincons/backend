@@ -6,6 +6,10 @@ const multer = require('multer');
 const { exec } = require('child_process');
 
 const app = express();
+
+// Cấu hình tin tưởng Proxy từ IIS (giúp nhận diện chuẩn xác IP và Header khi chạy qua Reverse Proxy)
+app.set('trust proxy', true);
+
 app.use(cors());
 app.use(express.json());
 
@@ -364,4 +368,4 @@ app.use('/files', express.static(ROOT_DIR));
 app.use('/database/bim-vdc', express.static(ROOT_DIR));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`CDE Server sẵn sàng tại http://localhost:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`CDE Server sẵn sàng tại http://0.0.0.0:${PORT}`));
