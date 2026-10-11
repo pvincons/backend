@@ -2,14 +2,14 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const https = require('https'); // Thêm module https
-const http = require('http');   // (Tùy chọn) Dùng để redirect http sang https
+const https = require('https');
+const http = require('http');
 const multer = require('multer');
 const { exec } = require('child_process');
 
 const app = express();
 
-// Cấu hình tin tưởng Proxy từ IIS (giúp nhận diện chuẩn xác IP và Header khi chạy qua Reverse Proxy)
+// Cấu hình tin tưởng Proxy
 app.set('trust proxy', true);
 
 app.use(cors());
@@ -153,7 +153,6 @@ app.get('/api/cde-files', (req, res) => {
     return handleGetFiles(req, res);
 });
 
-// API Danh sách dự án gốc
 app.get('/api/projects', (req, res) => {
     try {
         if (!fs.existsSync(ROOT_DIR)) return res.json([]);
@@ -359,24 +358,49 @@ app.use('/files', express.static(ROOT_DIR));
 app.use('/database/bim-vdc', express.static(ROOT_DIR));
 
 // ===============================================================
-// CẤU HÌNH KHỞI CHẠY HTTPS TRỰC TIẾP TRÊN NODE.JS
+// KHỞI CHẠY TỰ ĐỘNG THÔNG MINH (HTTPS / HTTP FALLBACK)
 // ===============================================================
 
-const PORT = process.env.PORT || 443; // Cổng chuẩn HTTPS là 443
+const PORT = process.env.PORT || 443;
 
-try {
-    // Đọc chứng chỉ SSL Let's Encrypt trên server (Thay đổi đường dẫn nếu cần thiết)
-    const sslOptions = {
-        key: fs.readFileSync('/etc/letsencrypt/live/pvincons.cloud/privkey.pem'),
-        cert: fs.readFileSync('/etc/letsencrypt/live/pvincons.cloud/fullchain.pem')
-    };
+// Các đường dẫn kiểm tra chứng chỉ SSL phổ biến trên Windows / Linux
+const possibleKeyPaths = [
+    path.join(__dirname, 'privkey.pem'),
+    'C:/etc/letsencrypt/live/pvincons.cloud/privkey.pem',
+    '/etc/letsencrypt/live/pvincons.cloud/privkey.pem'
+];
 
-    https.createServer(sslOptions, app).listen(PORT, '0.0.0.0', () => {
-        console.log(`CDE Secure Server (HTTPS) đang chạy tại https://0.0.0.0:${PORT}`);
-    });
-} catch (error) {
-    console.error("Không tìm thấy chứng chỉ SSL! Đang fallback chạy tạm qua cổng HTTP...", error.message);
-    app.listen(3000, '0.0.0.0', () => {
-        console.log(`CDE Server chạy qua HTTP tại http://0.0.0.0:3000`);
+const possibleCertPaths = [
+    path.join(__dirname, 'fullchain.pem'),
+    'C:/etc/letsencrypt/live/pvincons.cloud/fullchain.pem',
+    '/etc/letsencrypt/live/pvincons.cloud/fullchain.pem'
+];
+
+let keyPath = possibleKeyPaths.find(p => fs.existsSync(p));
+let certPath = possibleCertPaths.find(p => fs.existsSync(p));
+
+if (keyPath && certPath) {
+    try {
+        const sslOptions = {
+            key: fs.readFileSync(keyPath),
+            cert: fs.readFileSync(certPath)
+        };
+
+        https.createServer(sslOptions, app).listen(PORT, '0.0.0.0', () => {
+            console.log(`🚀 CDE Secure Server (HTTPS) đang chạy an toàn tuyệt đối qua cổng ${PORT}`);
+        });
+    } catch (err) {
+        console.error("⚠️ Lỗi khởi tạo HTTPS, chuyển về cổng HTTP mặc định:", err.message);
+        startHttpServer();
+    }
+} else {
+    console.log("ℹ️ Không tìm thấy file chứng chỉ SSL trong thư mục hiện tại. Đang khởi chạy qua HTTP...");
+    startHttpServer();
+}
+
+function startHttpServer() {
+    const HTTP_PORT = process.env.HTTP_PORT || 3000;
+    app.listen(HTTP_PORT, '0.0.0.0', () => {
+        console.log(`🌐 CDE Server đang chạy qua HTTP tại http://0.0.0.0:${HTTP_PORT}`);
     });
 }
