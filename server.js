@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const https = require('https'); // Thêm module https
+const http = require('http');   // (Tùy chọn) Dùng để redirect http sang https
 const multer = require('multer');
 const { exec } = require('child_process');
 
@@ -167,7 +169,6 @@ app.get('/api/projects', (req, res) => {
 // 2. CÁC THAO TÁC QUẢN LÝ DỮ LIỆU
 // ===============================================================
 
-// API Đổi tên Tệp tin / Thư mục
 app.post(['/api/rename', '/api/files/rename'], (req, res) => {
     const { path: itemPath, oldPath, newName } = req.body;
     const targetPath = itemPath || oldPath;
@@ -198,7 +199,6 @@ app.post(['/api/rename', '/api/files/rename'], (req, res) => {
     }
 });
 
-// API Xóa Tệp tin / Thư mục
 app.post(['/api/delete', '/api/files/delete'], (req, res) => {
     const { path: itemPath, targetPath } = req.body;
     const itemToDelete = itemPath || targetPath;
@@ -225,7 +225,6 @@ app.post(['/api/delete', '/api/files/delete'], (req, res) => {
     }
 });
 
-// API Sao chép (Copy)
 app.post(['/api/copy', '/api/files/copy'], (req, res) => {
     const { sourcePath, targetDir } = req.body;
 
@@ -261,7 +260,6 @@ app.post(['/api/copy', '/api/files/copy'], (req, res) => {
     }
 });
 
-// API Di chuyển (Move)
 app.post(['/api/move', '/api/files/move'], (req, res) => {
     const { sourcePath, targetDir } = req.body;
 
@@ -301,7 +299,6 @@ app.post(['/api/move', '/api/files/move'], (req, res) => {
     }
 });
 
-// API Mở file bằng ứng dụng chuyên dụng trực tiếp trên máy chủ VPS
 app.post(['/api/open-local', '/api/files/open', '/api/open'], (req, res) => {
     const { path: itemPath } = req.body;
     if (!itemPath) return res.status(400).json({ error: 'Cần truyền đường dẫn tệp tin' });
@@ -322,11 +319,8 @@ app.post(['/api/open-local', '/api/files/open', '/api/open'], (req, res) => {
             command = `xdg-open "${absPath}"`;
         }
 
-        console.log(`[EXEC COMMAND ON SERVER]: ${command}`);
-
         exec(command, (err) => {
             if (err) {
-                console.error('Lỗi khi kích hoạt phần mềm mở tệp trên Server:', err);
                 return res.status(500).json({ error: 'Không thể mở tệp trên Server: ' + err.message });
             }
             res.json({ success: true, message: 'Đã phát lệnh mở tệp trên hệ thống Server thành công' });
@@ -336,7 +330,6 @@ app.post(['/api/open-local', '/api/files/open', '/api/open'], (req, res) => {
     }
 });
 
-// API Tạo thư mục mới
 app.post('/api/create-folder', (req, res) => {
     const { parentPath, folderName } = req.body;
     if (!folderName) return res.status(400).json({ error: 'Tên thư mục không hợp lệ' });
@@ -355,7 +348,6 @@ app.post('/api/create-folder', (req, res) => {
     }
 });
 
-// API Upload Tệp tin
 app.post('/api/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Chưa chọn tệp tin' });
     res.json({ success: true, file: req.file });
@@ -363,9 +355,28 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 
 app.use(express.static(__dirname));
 
-// Phục vụ tĩnh trực tiếp từ thư mục ROOT_DIR (database/bim-vdc)
 app.use('/files', express.static(ROOT_DIR));
 app.use('/database/bim-vdc', express.static(ROOT_DIR));
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`CDE Server sẵn sàng tại http://0.0.0.0:${PORT}`));
+// ===============================================================
+// CẤU HÌNH KHỞI CHẠY HTTPS TRỰC TIẾP TRÊN NODE.JS
+// ===============================================================
+
+const PORT = process.env.PORT || 443; // Cổng chuẩn HTTPS là 443
+
+try {
+    // Đọc chứng chỉ SSL Let's Encrypt trên server (Thay đổi đường dẫn nếu cần thiết)
+    const sslOptions = {
+        key: fs.readFileSync('/etc/letsencrypt/live/pvincons.cloud/privkey.pem'),
+        cert: fs.readFileSync('/etc/letsencrypt/live/pvincons.cloud/fullchain.pem')
+    };
+
+    https.createServer(sslOptions, app).listen(PORT, '0.0.0.0', () => {
+        console.log(`CDE Secure Server (HTTPS) đang chạy tại https://0.0.0.0:${PORT}`);
+    });
+} catch (error) {
+    console.error("Không tìm thấy chứng chỉ SSL! Đang fallback chạy tạm qua cổng HTTP...", error.message);
+    app.listen(3000, '0.0.0.0', () => {
+        console.log(`CDE Server chạy qua HTTP tại http://0.0.0.0:3000`);
+    });
+}
