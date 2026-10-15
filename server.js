@@ -30,7 +30,6 @@ app.use((req, res, next) => {
 // MIDDLEWARE XÁC THỰC BẢO MẬT (AUTH GUARD)
 // ===============================================================
 function verifyAuthToken(req, res, next) {
-    // Lấy token từ Header, Cookie, hoặc URL Query Param
     const authHeader = req.headers['authorization'];
     let token = authHeader && authHeader.split(' ')[1];
 
@@ -52,7 +51,6 @@ function verifyAuthToken(req, res, next) {
         `);
     }
 
-    // Kiểm tra tính hợp lệ của Token
     jwt.verify(token, JWT_SECRET, (err, user) => {
         if (err) {
             return res.status(401).send('Xác thực thất bại! Token đã hết hạn hoặc không hợp lệ.');
@@ -63,14 +61,13 @@ function verifyAuthToken(req, res, next) {
 }
 
 // ===============================================================
-// PROXY BẢO MẬT CHO REVIT SERVER ADMINISTRATOR 2027
+// PROXY BẢO MẬT CHO REVIT SERVER ADMINISTRATOR
 // ===============================================================
-// Điều hướng an toàn request /RevitServerAdmin2027 về cổng nội bộ IIS
 app.use(
     '/RevitServerAdmin2027',
-    verifyAuthToken, // Khóa bảo mật: Phải đăng nhập mới qua được lớp này
+    verifyAuthToken,
     createProxyMiddleware({
-        target: 'http://127.0.0.1:8080', // Cổng nội bộ IIS chạy Revit Server Admin
+        target: 'http://127.0.0.1:808', // Cổng nội bộ Revit Server / IIS của bạn
         changeOrigin: true,
         pathRewrite: {
             '^/RevitServerAdmin2027': '/RevitServerAdmin2027',
@@ -85,4 +82,76 @@ app.use(
 const BASE_DATABASE_DIR = path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 
-// ... (Giữ nguyên toàn bộ phần cấu hình Multer, API file operations hiện tại) ...
+// Đảm bảo thư mục database tồn tại
+if (!fs.existsSync(ROOT_DIR)) {
+    fs.mkdirSync(ROOT_DIR, { recursive: true });
+}
+
+// Cấu hình Multer để upload file
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const relPath = req.query.path || '';
+        const targetDir = path.join(ROOT_DIR, relPath);
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+        }
+        cb(null, targetDir);
+    },
+    filename: (req, file, cb) => {
+        // Giữ nguyên tên tiếng Việt có dấu
+        cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8'));
+    }
+});
+const upload = multer({ storage: storage });
+
+// ===============================================================
+// API CDE - QUẢN LÝ DỮ LIỆU TẬP TRUNG
+// ===============================================================
+
+// 1. API Kiểm tra kết nối Server từ Frontend
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', message: 'CDE Backend Server đang hoạt động ổn định!' });
+});
+
+// 2. API Lấy danh sách file và thư mục
+app.get('/api/files', (req, res) => {
+    try {
+        const subPath = req.query.path || '';
+        const targetDir = path.join(ROOT_DIR, subPath);
+
+        if (!fs.existsSync(targetDir)) {
+            return res.status(404).json({ error: 'Thư mục không tồn tại' });
+        }
+
+        const items = fs.readdirSync(targetDir, { withFileTypes: true });
+        const result = items.map(item => {
+            const itemPath = path.join(subPath, item.name);
+            return {
+                name: item.name,
+                isDirectory: item.isDirectory(),
+                path: itemPath.replace(/\\/g, '/')
+            };
+        });
+
+        res.json({ success: true, data: result });
+    } catch (error) {
+        console.error('Lỗi đọc thư mục:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 3. API Upload file lên thư mục
+app.post('/api/upload', upload.array('files'), (req, res) => {
+    try {
+        res.json({ success: true, message: 'Tải lên tập tin thành công!' });
+    } catch (error) {
+        console.error('Lỗi upload:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Khởi động Server HTTP thuần trên cổng 3000
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 CDE Server đang chạy qua HTTP tại cổng ${PORT}`);
+});
