@@ -358,10 +358,10 @@ app.use('/files', express.static(ROOT_DIR));
 app.use('/database/bim-vdc', express.static(ROOT_DIR));
 
 // ===============================================================
-// KHỞI CHẠY TỰ ĐỘNG THÔNG MINH (HTTPS / HTTP FALLBACK)
+// KHỞI CHẠY TỰ ĐỘNG THÔNG MINH (LẤY CỔNG TỪ BIẾN MÔI TRƯỜNG HOẶC MẶC ĐỊNH 3000)
 // ===============================================================
 
-const PORT = process.env.PORT || 443;
+const PORT = process.env.PORT || process.env.HTTP_PORT || 3000;
 
 // Các đường dẫn kiểm tra chứng chỉ SSL phổ biến trên Windows / Linux
 const possibleKeyPaths = [
@@ -399,8 +399,7 @@ if (keyPath && certPath) {
 }
 
 function startHttpServer() {
-    const HTTP_PORT = process.env.HTTP_PORT || 3000;
-    app.listen(HTTP_PORT, '0.0.0.0', () => {
-        console.log(`🌐 CDE Server đang chạy qua HTTP tại http://0.0.0.0:${HTTP_PORT}`);
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🌐 CDE Server đang chạy qua HTTP tại http://0.0.0.0:${PORT}`);
     });
 }
