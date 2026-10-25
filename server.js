@@ -39,6 +39,7 @@ app.use(
 const BASE_DATABASE_DIR = path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
+const CONFIG_FILE_PATH = path.join(BASE_DATABASE_DIR, 'server-config.json');
 
 if (!fs.existsSync(ROOT_DIR)) {
     fs.mkdirSync(ROOT_DIR, { recursive: true });
@@ -88,6 +89,37 @@ const upload = multer({ storage: storage });
 // ===============================================================
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'CDE Backend Server đang hoạt động ổn định!' });
+});
+
+// ===============================================================
+// API QUẢN LÝ CẤU HÌNH SERVER CHUNG CHO TOÀN HỆ THỐNG
+// ===============================================================
+app.get('/api/config', (req, res) => {
+    try {
+        if (fs.existsSync(CONFIG_FILE_PATH)) {
+            const data = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
+            res.json(JSON.parse(data));
+        } else {
+            res.json({ apiUrl: 'https://api.pvincons.cloud' });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/config', (req, res) => {
+    try {
+        const { apiUrl } = req.body;
+        if (!apiUrl) {
+            return res.status(400).json({ success: false, error: 'Thiếu đường dẫn API URL!' });
+        }
+        
+        fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify({ apiUrl }, null, 2), 'utf8');
+        console.log(`[CONFIG UPDATE] Đường dẫn API toàn hệ thống đã được đổi thành: ${apiUrl}`);
+        res.json({ success: true, message: 'Đã cập nhật cấu hình cho toàn hệ thống thành công!' });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
 });
 
 // ===============================================================
@@ -340,19 +372,12 @@ app.post('/api/copy', (req, res) => {
 
 // ===============================================================
 // CHAT NHÓM REALTIME (SSE)
-//   GET  /api/chat/stream?username=...   Kênh realtime: sự kiện chat | presence
-//   GET  /api/chat/history?limit=100     Lịch sử tin nhắn
-//   POST /api/chat/send {username,text}  Gửi tin nhắn
-// Lịch sử lưu ngoài thư mục dự án (xem CHAT_DATA_DIR), người dùng lấy từ assets/data/users.json
 // ===============================================================
-// Lịch sử chat lưu NGOÀI thư mục dự án để Live Server (VS Code) không tự tải lại trang
-// mỗi khi có tin nhắn mới. Có thể đổi nơi lưu bằng biến môi trường CHAT_DATA_DIR.
 const CHAT_DATA_DIR = process.env.CHAT_DATA_DIR || path.join(__dirname, '..', 'CDE_CHAT_DATA');
-const CHAT_LEGACY_FILE = path.join(BASE_DATABASE_DIR, 'chat.json'); // vị trí cũ (bản trước)
+const CHAT_LEGACY_FILE = path.join(BASE_DATABASE_DIR, 'chat.json');
 let chatFilePath = path.join(CHAT_DATA_DIR, 'chat.json');
 try {
     fs.mkdirSync(CHAT_DATA_DIR, { recursive: true });
-    // Chuyển lịch sử cũ sang vị trí mới (nếu có)
     if (!fs.existsSync(chatFilePath) && fs.existsSync(CHAT_LEGACY_FILE)) {
         fs.copyFileSync(CHAT_LEGACY_FILE, chatFilePath);
     }
@@ -364,15 +389,15 @@ console.log('💬 Lịch sử chat lưu tại:', chatFilePath);
 const CHAT_USERS_FILE = path.join(__dirname, 'assets', 'data', 'users.json');
 const CHAT_MAX_MESSAGES = 1000;
 const CHAT_MAX_TEXT = 2000;
-const CHAT_RATE_COUNT = 10;        // tối đa 10 tin ...
-const CHAT_RATE_WINDOW_MS = 10000; // ... trong 10 giây
+const CHAT_RATE_COUNT = 10;
+const CHAT_RATE_WINDOW_MS = 10000;
 const CHAT_KEEPALIVE_MS = 25000;
 
 let chatMessages = [];
 try {
     const parsed = JSON.parse(fs.readFileSync(chatFilePath, 'utf8'));
     if (Array.isArray(parsed)) chatMessages = parsed.slice(-CHAT_MAX_MESSAGES);
-} catch (err) { /* chưa có file → bắt đầu rỗng */ }
+} catch (err) { /* ignore */ }
 
 function saveChatMessages() {
     try {
@@ -384,7 +409,6 @@ function saveChatMessages() {
     }
 }
 
-// Chỉ lấy các trường công khai của user, KHÔNG bao giờ trả mật khẩu
 function findChatUser(username) {
     if (!username || typeof username !== 'string') return null;
     try {
@@ -395,7 +419,7 @@ function findChatUser(username) {
             username: u.username,
             fullName: u.fullName || u.username,
             role: (u.role || '').toString().toUpperCase(),
-            groups: Array.isArray(u.groups) ? u.groups.map(g => String(g).toLowerCase()) : [] // vd: ["site"]
+            groups: Array.isArray(u.groups) ? u.groups.map(g => String(g).toLowerCase()) : []
         };
     } catch (err) {
         console.error('Chat không đọc được users.json:', err.message);
@@ -403,15 +427,13 @@ function findChatUser(username) {
     }
 }
 
-// --- Phòng chat: 'general' (chat chung, mặc định) và 'site' (nhóm nhân sự công trường) ---
-// Vào được nhóm Site: role ADMIN/MASTER, hoặc trong users.json có "groups": ["site"].
 const CHAT_SITE_ROLES = ['ADMIN', 'MASTER'];
 function chatRoomOf(v) { return v === 'site' ? 'site' : 'general'; }
 function canJoinChatRoom(user, room) {
     return room !== 'site' || CHAT_SITE_ROLES.includes(user.role) || (user.groups || []).includes('site');
 }
 
-const chatClients = new Set(); // { res, user, room }
+const chatClients = new Set();
 
 function chatSend(res, event, data) {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -420,7 +442,7 @@ function chatSend(res, event, data) {
 function chatBroadcast(event, data, room) {
     for (const c of chatClients) {
         if (room && c.room !== room) continue;
-        try { chatSend(c.res, event, data); } catch (err) { /* kết nối đã đóng */ }
+        try { chatSend(c.res, event, data); } catch (err) { /* ignore */ }
     }
 }
 
@@ -433,7 +455,7 @@ function chatOnlineList(room) {
     return Array.from(map.values());
 }
 
-const chatSendLog = new Map(); // username → [timestamps]
+const chatSendLog = new Map();
 function isChatRateLimited(username) {
     const now = Date.now();
     const arr = (chatSendLog.get(username) || []).filter(t => now - t < CHAT_RATE_WINDOW_MS);
@@ -453,7 +475,7 @@ app.get('/api/chat/stream', (req, res) => {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no', // tắt buffer khi chạy sau nginx
+        'X-Accel-Buffering': 'no',
         'Access-Control-Allow-Origin': req.headers.origin || '*'
     });
     res.write('retry: 3000\n\n');
@@ -477,10 +499,10 @@ app.get('/api/chat/stream', (req, res) => {
 app.get('/api/chat/history', (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, CHAT_MAX_MESSAGES);
     const room = chatRoomOf(req.query.room);
-    if (room !== 'general') { // phòng riêng: bắt buộc xác thực tài khoản + kiểm tra nhóm
+    if (room !== 'general') {
         const user = findChatUser(req.query.username);
         if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
-        if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Bạn không thuộc nhóm Site' });
+        if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
     }
     const list = chatMessages.filter(m => (m.room || 'general') === room);
     res.json({ success: true, messages: list.slice(-limit) });
@@ -520,7 +542,7 @@ app.post('/api/chat/send', (req, res) => {
     res.json({ success: true, message: msg });
 });
 
-// Static serve thư mục chứa database file để client có thể truy cập trực tiếp khi cần
+// Static serve thư mục chứa database file
 app.use('/files', express.static(ROOT_DIR));
 
 const PORT = process.env.PORT || 3000;
