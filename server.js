@@ -39,7 +39,6 @@ app.use(
 const BASE_DATABASE_DIR = path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
-const CONFIG_FILE_PATH = path.join(BASE_DATABASE_DIR, 'server-config.json');
 
 if (!fs.existsSync(ROOT_DIR)) {
     fs.mkdirSync(ROOT_DIR, { recursive: true });
@@ -89,37 +88,6 @@ const upload = multer({ storage: storage });
 // ===============================================================
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'CDE Backend Server đang hoạt động ổn định!' });
-});
-
-// ===============================================================
-// API QUẢN LÝ CẤU HÌNH SERVER CHUNG CHO TOÀN HỆ THỐNG
-// ===============================================================
-app.get('/api/config', (req, res) => {
-    try {
-        if (fs.existsSync(CONFIG_FILE_PATH)) {
-            const data = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
-            res.json(JSON.parse(data));
-        } else {
-            res.json({ apiUrl: 'https://api.pvincons.cloud' });
-        }
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.post('/api/config', (req, res) => {
-    try {
-        const { apiUrl } = req.body;
-        if (!apiUrl) {
-            return res.status(400).json({ success: false, error: 'Thiếu đường dẫn API URL!' });
-        }
-        
-        fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify({ apiUrl }, null, 2), 'utf8');
-        console.log(`[CONFIG UPDATE] Đường dẫn API toàn hệ thống đã được đổi thành: ${apiUrl}`);
-        res.json({ success: true, message: 'Đã cập nhật cấu hình cho toàn hệ thống thành công!' });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
 });
 
 // ===============================================================
@@ -372,6 +340,10 @@ app.post('/api/copy', (req, res) => {
 
 // ===============================================================
 // CHAT NHÓM REALTIME (SSE)
+//   GET  /api/chat/stream?username=...   Kênh realtime: sự kiện chat | presence
+//   GET  /api/chat/history?limit=100     Lịch sử tin nhắn
+//   POST /api/chat/send {username,text}  Gửi tin nhắn
+// Lịch sử lưu ngoài thư mục dự án (xem CHAT_DATA_DIR), người dùng lấy từ assets/data/users.json
 // ===============================================================
 const CHAT_DATA_DIR = process.env.CHAT_DATA_DIR || path.join(__dirname, '..', 'CDE_CHAT_DATA');
 const CHAT_LEGACY_FILE = path.join(BASE_DATABASE_DIR, 'chat.json');
@@ -397,7 +369,7 @@ let chatMessages = [];
 try {
     const parsed = JSON.parse(fs.readFileSync(chatFilePath, 'utf8'));
     if (Array.isArray(parsed)) chatMessages = parsed.slice(-CHAT_MAX_MESSAGES);
-} catch (err) { /* ignore */ }
+} catch (err) { /* chưa có file → bắt đầu rỗng */ }
 
 function saveChatMessages() {
     try {
@@ -542,7 +514,7 @@ app.post('/api/chat/send', (req, res) => {
     res.json({ success: true, message: msg });
 });
 
-// Static serve thư mục chứa database file
+// Static serve thư mục chứa database file để client có thể truy cập trực tiếp khi cần
 app.use('/files', express.static(ROOT_DIR));
 
 const PORT = process.env.PORT || 3000;
