@@ -1,0 +1,26 @@
+{
+  "database/bim-vdc/Project_01/02_SHARED/PROJECT_01-PVI-ZZ-ZZ-DR-A-0001.pdf": [
+    {
+      "text": "Đã kiểm tra thông tin dự án",
+      "time": "15:30:58 24/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    },
+    {
+      "text": "Kiểm tra hoàn thành công việc",
+      "time": "15:32:18 24/10/2026",
+      "author": "TRẦN HẠO MINH"
+    },
+    {
+      "text": "Hoàn thành thiết kế",
+      "time": "20:32:57 24/10/2026",
+      "author": "TRẦN HẠO MINH"
+    }
+  ],
+  "database/bim-vdc/Project_01/01_WIP/PROJECT_01-PVI-ZZ-ZZ-DR-A-0001.pdf": [
+    {
+      "text": "Làm mới dự án",
+      "time": "20:45:22 24/10/2026",
+      "author": "TRẦN HẠO MINH"
+    }
+  ]
+}
