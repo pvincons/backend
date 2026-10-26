@@ -15,14 +15,14 @@ const app = express();
 // ===============================================================
 app.set('trust proxy', true);
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // Tăng giới hạn nhận payload để upload ảnh base64 lớn
+app.use(express.json({ limit: '10mb' }));
 
 const JWT_SECRET = process.env.JWT_SECRET || 'PV_INCONS_SECRET_KEY_2026';
 const PORT = process.env.PORT || 3000;
 
 // Middleware ghi log request thời gian thực
 app.use((req, res, next) => {
-    console.log(`[CDE & AUTH SERVER] [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
+    console.log(`[PV INCONS SERVER] [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
     next();
 });
 
@@ -35,7 +35,7 @@ const BASE_DATABASE_DIR = path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
 
-// Đảm bảo các thư mục cần thiết tồn tại
+// Đảm bảo thư mục tồn tại
 if (!fs.existsSync(path.dirname(USER_FILE_PATH))) {
     fs.mkdirSync(path.dirname(USER_FILE_PATH), { recursive: true });
 }
@@ -46,7 +46,7 @@ if (!fs.existsSync(ROOT_DIR)) {
     fs.mkdirSync(ROOT_DIR, { recursive: true });
 }
 
-// Khởi tạo users.json mặc định nếu chưa có
+// Khởi tạo tài khoản master mặc định nếu chưa có
 if (!fs.existsSync(USER_FILE_PATH)) {
     const defaultPasswordHash = bcrypt.hashSync("123456", 10);
     const defaultUsers = [
@@ -137,15 +137,8 @@ app.post('/api/upload-avatar', (req, res) => {
         const filePath = path.join(AVATAR_DIR, fileName);
 
         fs.writeFileSync(filePath, buffer);
-
-        console.log(`[AVATAR SYNC] Đã lưu ảnh đại diện thành công: assets/data/avatar/${fileName}`);
-        res.json({
-            success: true,
-            message: 'Tải lên avatar thành công!',
-            path: `assets/data/avatar/${fileName}`
-        });
+        res.json({ success: true, message: 'Tải lên avatar thành công!', path: `assets/data/avatar/${fileName}` });
     } catch (error) {
-        console.error('Lỗi lưu avatar:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -156,11 +149,10 @@ app.post('/api/upload-avatar', (req, res) => {
 function readIssuesDB() {
     try {
         if (fs.existsSync(ISSUES_FILE_PATH)) {
-            const data = fs.readFileSync(ISSUES_FILE_PATH, 'utf8');
-            return JSON.parse(data || '{}');
+            return JSON.parse(fs.readFileSync(ISSUES_FILE_PATH, 'utf8') || '{}');
         }
     } catch (err) {
-        console.error('Lỗi đọc file issues.json:', err);
+        console.error('Lỗi đọc issues.json:', err);
     }
     return {};
 }
@@ -170,68 +162,38 @@ function writeIssuesDB(dbData) {
         fs.writeFileSync(ISSUES_FILE_PATH, JSON.stringify(dbData, null, 2), 'utf8');
         return true;
     } catch (err) {
-        console.error('Lỗi ghi file issues.json:', err);
         return false;
     }
 }
 
 app.get('/api/issues', (req, res) => {
-    try {
-        const issues = readIssuesDB();
-        res.json(issues);
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    try { res.json(readIssuesDB()); } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/issues/add', (req, res) => {
     try {
         const { filePath, text, author } = req.body;
-        if (!filePath || !text) {
-            return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file hoặc nội dung issue!' });
-        }
-
+        if (!filePath || !text) return res.status(400).json({ success: false, error: 'Thiếu thông tin!' });
         const db = readIssuesDB();
-        if (!db[filePath]) {
-            db[filePath] = [];
-        }
-
-        const newIssue = {
-            text: text.trim(),
-            time: new Date().toLocaleString('vi-VN'),
-            author: author || 'Phương Vy'
-        };
-
-        db[filePath].push(newIssue);
-
-        if (writeIssuesDB(db)) {
-            res.json({ success: true, message: 'Đã lưu Issue thành công!', issues: db[filePath] });
-        } else {
-            res.status(500).json({ success: false, error: 'Không thể ghi file issues.json trên server' });
-        }
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+        if (!db[filePath]) db[filePath] = [];
+        db[filePath].push({ text: text.trim(), time: new Date().toLocaleString('vi-VN'), author: author || 'Phương Vy' });
+        if (writeIssuesDB(db)) res.json({ success: true, message: 'Đã lưu Issue!', issues: db[filePath] });
+        else res.status(500).json({ success: false, error: 'Không thể ghi file' });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/issues/delete', (req, res) => {
     try {
         const { filePath, index } = req.body;
         const db = readIssuesDB();
-
         if (db[filePath] && typeof db[filePath][index] !== 'undefined') {
             db[filePath].splice(index, 1);
-            if (db[filePath].length === 0) {
-                delete db[filePath];
-            }
+            if (db[filePath].length === 0) delete db[filePath];
             writeIssuesDB(db);
-            return res.json({ success: true, message: 'Đã xóa Issue thành công!', issues: db[filePath] || [] });
+            return res.json({ success: true, message: 'Đã xóa Issue!', issues: db[filePath] || [] });
         }
-
-        res.status(404).json({ success: false, error: 'Không tìm thấy Issue cần xóa!' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+        res.status(404).json({ success: false, error: 'Không tìm thấy Issue!' });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 // ===============================================================
@@ -241,9 +203,7 @@ const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const relPath = req.query.path || req.body.targetPath || '';
         const targetDir = path.join(ROOT_DIR, relPath.replace(/^database\/bim-vdc\/?/, ''));
-        if (!fs.existsSync(targetDir)) {
-            fs.mkdirSync(targetDir, { recursive: true });
-        }
+        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
         cb(null, targetDir);
     },
     filename: (req, file, cb) => {
@@ -258,185 +218,100 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/files', (req, res) => {
     try {
-        const subPath = req.query.path || '';
-        const cleanSubPath = subPath.replace(/^database\/bim-vdc\/?/, '');
-        const targetDir = path.join(ROOT_DIR, cleanSubPath);
-
-        if (!fs.existsSync(targetDir)) {
-            return res.status(404).json({ error: 'Thư mục không tồn tại' });
-        }
-
+        const subPath = (req.query.path || '').replace(/^database\/bim-vdc\/?/, '');
+        const targetDir = path.join(ROOT_DIR, subPath);
+        if (!fs.existsSync(targetDir)) return res.status(404).json({ error: 'Thư mục không tồn tại' });
         const items = fs.readdirSync(targetDir, { withFileTypes: true });
-        const result = items.map(item => {
-            const itemRelPath = path.join(cleanSubPath, item.name);
-            return {
-                name: item.name,
-                isDirectory: item.isDirectory(),
-                type: item.isDirectory() ? 'folder' : 'file',
-                path: 'database/bim-vdc/' + itemRelPath.replace(/\\/g, '/')
-            };
-        });
-
-        res.json(result);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.json(items.map(item => ({
+            name: item.name,
+            isDirectory: item.isDirectory(),
+            type: item.isDirectory() ? 'folder' : 'file',
+            path: 'database/bim-vdc/' + path.join(subPath, item.name).replace(/\\/g, '/')
+        })));
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/cde-files', (req, res) => {
     try {
         function walkDir(dir, fileList = []) {
-            const files = fs.readdirSync(dir, { withFileTypes: true });
-            files.forEach(file => {
+            fs.readdirSync(dir, { withFileTypes: true }).forEach(file => {
                 const fullPath = path.join(dir, file.name);
-                const relPath = path.relative(BASE_DATABASE_DIR, fullPath);
-                if (file.isDirectory()) {
-                    fileList.push({
-                        name: file.name,
-                        path: 'database/' + relPath.replace(/\\/g, '/'),
-                        type: 'folder'
-                    });
-                    walkDir(fullPath, fileList);
-                } else {
-                    fileList.push({
-                        name: file.name,
-                        path: 'database/' + relPath.replace(/\\/g, '/'),
-                        type: 'file'
-                    });
-                }
+                const relPath = path.relative(BASE_DATABASE_DIR, fullPath).replace(/\\/g, '/');
+                fileList.push({ name: file.name, path: 'database/' + relPath, type: file.isDirectory() ? 'folder' : 'file' });
+                if (file.isDirectory()) walkDir(fullPath, fileList);
             });
             return fileList;
         }
-        const allItems = walkDir(ROOT_DIR);
-        res.json(allItems);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.json(walkDir(ROOT_DIR));
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/upload', upload.single('file'), (req, res) => {
-    try {
-        res.json({ success: true, message: 'Tải lên tập tin thành công!' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    res.json({ success: true, message: 'Tải lên tập tin thành công!' });
 });
 
 app.post('/api/create-folder', (req, res) => {
     try {
         const { parentPath, folderName } = req.body;
-        const cleanParent = (parentPath || 'database/bim-vdc').replace(/^database\/bim-vdc\/?/, '');
-        const targetDir = path.join(ROOT_DIR, cleanParent, folderName);
-
+        const targetDir = path.join(ROOT_DIR, (parentPath || 'database/bim-vdc').replace(/^database\/bim-vdc\/?/, ''), folderName);
         if (!fs.existsSync(targetDir)) {
             fs.mkdirSync(targetDir, { recursive: true });
             res.json({ success: true, message: 'Tạo thư mục thành công!' });
         } else {
             res.status(400).json({ success: false, error: 'Thư mục đã tồn tại!' });
         }
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/rename', (req, res) => {
     try {
         const { path: itemPath, newName } = req.body;
-        const cleanPath = itemPath.replace(/^database\/bim-vdc\/?/, '');
-        const oldFullPath = path.join(ROOT_DIR, cleanPath);
-        const parentDir = path.dirname(oldFullPath);
-        const newFullPath = path.join(parentDir, newName);
-
+        const oldFullPath = path.join(ROOT_DIR, itemPath.replace(/^database\/bim-vdc\/?/, ''));
         if (fs.existsSync(oldFullPath)) {
-            fs.renameSync(oldFullPath, newFullPath);
+            fs.renameSync(oldFullPath, path.join(path.dirname(oldFullPath), newName));
             res.json({ success: true, message: 'Đổi tên thành công!' });
         } else {
             res.status(404).json({ success: false, error: 'Đường dẫn không tồn tại!' });
         }
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/delete', (req, res) => {
     try {
-        const { path: itemPath } = req.body;
-        const cleanPath = itemPath.replace(/^database\/bim-vdc\/?/, '');
-        const fullPath = path.join(ROOT_DIR, cleanPath);
-
+        const fullPath = path.join(ROOT_DIR, req.body.path.replace(/^database\/bim-vdc\/?/, ''));
         if (fs.existsSync(fullPath)) {
-            const stat = fs.statSync(fullPath);
-            if (stat.isDirectory()) {
-                fs.rmSync(fullPath, { recursive: true, force: true });
-            } else {
-                fs.unlinkSync(fullPath);
-            }
+            fs.rmSync(fullPath, { recursive: true, force: true });
             res.json({ success: true, message: 'Xóa thành công!' });
         } else {
-            res.status(404).json({ success: false, error: 'Đường dẫn không tồn tại!' });
+            res.status(404).json({ success: false, error: 'Không tồn tại!' });
         }
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/move', (req, res) => {
     try {
         const { sourcePath, targetDir } = req.body;
-        const cleanSource = sourcePath.replace(/^database\/bim-vdc\/?/, '');
-        const cleanTarget = targetDir.replace(/^database\/bim-vdc\/?/, '');
-        
-        const srcFullPath = path.join(ROOT_DIR, cleanSource);
-        const fileName = path.basename(srcFullPath);
-        const targetParentDir = path.join(ROOT_DIR, cleanTarget);
-        const destFullPath = path.join(targetParentDir, fileName);
-
-        if (!fs.existsSync(srcFullPath)) {
-            return res.status(404).json({ success: false, error: 'Đường dẫn nguồn không tồn tại!' });
-        }
-
-        if (!fs.existsSync(targetParentDir)) {
-            fs.mkdirSync(targetParentDir, { recursive: true });
-        }
-
-        fs.renameSync(srcFullPath, destFullPath);
-        console.log(`[REAL-TIME SYNC] Đã di chuyển file: ${cleanSource} ➔ ${cleanTarget}`);
-        res.json({ success: true, message: 'Di chuyển file thành công!' });
-    } catch (error) {
-        console.error('Lỗi di chuyển file:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
+        const srcFullPath = path.join(ROOT_DIR, sourcePath.replace(/^database\/bim-vdc\/?/, ''));
+        const destParent = path.join(ROOT_DIR, targetDir.replace(/^database\/bim-vdc\/?/, ''));
+        if (!fs.existsSync(srcFullPath)) return res.status(404).json({ success: false, error: 'Nguồn không tồn tại!' });
+        if (!fs.existsSync(destParent)) fs.mkdirSync(destParent, { recursive: true });
+        fs.renameSync(srcFullPath, path.join(destParent, path.basename(srcFullPath)));
+        res.json({ success: true, message: 'Di chuyển thành công!' });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/copy', (req, res) => {
     try {
         const { sourcePath, targetDir } = req.body;
-        const cleanSource = sourcePath.replace(/^database\/bim-vdc\/?/, '');
-        const cleanTarget = targetDir.replace(/^database\/bim-vdc\/?/, '');
-        
-        const srcFullPath = path.join(ROOT_DIR, cleanSource);
-        const fileName = path.basename(srcFullPath);
-        const targetParentDir = path.join(ROOT_DIR, cleanTarget);
-        const destFullPath = path.join(targetParentDir, fileName);
-
-        if (!fs.existsSync(srcFullPath)) {
-            return res.status(404).json({ success: false, error: 'Đường dẫn nguồn không tồn tại!' });
-        }
-
-        if (!fs.existsSync(targetParentDir)) {
-            fs.mkdirSync(targetParentDir, { recursive: true });
-        }
-
-        const stat = fs.statSync(srcFullPath);
-        if (stat.isDirectory()) {
-            fs.cpSync(srcFullPath, destFullPath, { recursive: true });
-        } else {
-            fs.copyFileSync(srcFullPath, destFullPath);
-        }
-        res.json({ success: true, message: 'Sao chép file thành công!' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+        const srcFullPath = path.join(ROOT_DIR, sourcePath.replace(/^database\/bim-vdc\/?/, ''));
+        const destParent = path.join(ROOT_DIR, targetDir.replace(/^database\/bim-vdc\/?/, ''));
+        if (!fs.existsSync(srcFullPath)) return res.status(404).json({ success: false, error: 'Nguồn không tồn tại!' });
+        if (!fs.existsSync(destParent)) fs.mkdirSync(destParent, { recursive: true });
+        const destPath = path.join(destParent, path.basename(srcFullPath));
+        if (fs.statSync(srcFullPath).isDirectory()) fs.cpSync(srcFullPath, destPath, { recursive: true });
+        else fs.copyFileSync(srcFullPath, destPath);
+        res.json({ success: true, message: 'Sao chép thành công!' });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 // ===============================================================
@@ -447,167 +322,64 @@ const CHAT_LEGACY_FILE = path.join(BASE_DATABASE_DIR, 'chat.json');
 let chatFilePath = path.join(CHAT_DATA_DIR, 'chat.json');
 try {
     fs.mkdirSync(CHAT_DATA_DIR, { recursive: true });
-    if (!fs.existsSync(chatFilePath) && fs.existsSync(CHAT_LEGACY_FILE)) {
-        fs.copyFileSync(CHAT_LEGACY_FILE, chatFilePath);
-    }
-} catch (err) {
-    console.warn('Không tạo được thư mục lưu chat, dùng tạm database/chat.json:', err.message);
-    chatFilePath = CHAT_LEGACY_FILE;
-}
-console.log('💬 Lịch sử chat lưu tại:', chatFilePath);
-
-const CHAT_MAX_MESSAGES = 1000;
-const CHAT_MAX_TEXT = 2000;
-const CHAT_RATE_COUNT = 10;
-const CHAT_RATE_WINDOW_MS = 10000;
-const CHAT_KEEPALIVE_MS = 25000;
+    if (!fs.existsSync(chatFilePath) && fs.existsSync(CHAT_LEGACY_FILE)) fs.copyFileSync(CHAT_LEGACY_FILE, chatFilePath);
+} catch (err) { chatFilePath = CHAT_LEGACY_FILE; }
 
 let chatMessages = [];
 try {
     const parsed = JSON.parse(fs.readFileSync(chatFilePath, 'utf8'));
-    if (Array.isArray(parsed)) chatMessages = parsed.slice(-CHAT_MAX_MESSAGES);
-} catch (err) { /* chưa có file → rỗng */ }
+    if (Array.isArray(parsed)) chatMessages = parsed.slice(-1000);
+} catch (e) {}
 
 function saveChatMessages() {
     try {
-        const tmp = chatFilePath + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(chatMessages));
-        fs.renameSync(tmp, chatFilePath);
-    } catch (err) {
-        console.error('Lỗi ghi file chat.json:', err.message);
-    }
+        fs.writeFileSync(chatFilePath + '.tmp', JSON.stringify(chatMessages));
+        fs.renameSync(chatFilePath + '.tmp', chatFilePath);
+    } catch (e) {}
 }
 
 function findChatUser(username) {
-    if (!username || typeof username !== 'string') return null;
+    if (!username) return null;
     try {
         const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8'));
         const u = users.find(x => x.username === username);
         if (!u) return null;
-        return {
-            username: u.username,
-            fullName: u.fullName || u.username,
-            role: (u.role || '').toString().toUpperCase(),
-            groups: Array.isArray(u.groups) ? u.groups.map(g => String(g).toLowerCase()) : []
-        };
-    } catch (err) {
-        console.error('Chat không đọc được users.json:', err.message);
-        return null;
-    }
-}
-
-const CHAT_SITE_ROLES = ['ADMIN', 'MASTER'];
-function chatRoomOf(v) { return v === 'site' ? 'site' : 'general'; }
-function canJoinChatRoom(user, room) {
-    return room !== 'site' || CHAT_SITE_ROLES.includes(user.role) || (user.groups || []).includes('site');
+        return { username: u.username, fullName: u.fullName || u.username, role: (u.role || '').toUpperCase(), groups: u.groups || [] };
+    } catch (e) { return null; }
 }
 
 const chatClients = new Set();
-
-function chatSend(res, event, data) {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
-function chatBroadcast(event, data, room) {
-    for (const c of chatClients) {
-        if (room && c.room !== room) continue;
-        try { chatSend(c.res, event, data); } catch (err) { /* ignore */ }
-    }
-}
-
-function chatOnlineList(room) {
-    const map = new Map();
-    for (const c of chatClients) {
-        if (room && c.room !== room) continue;
-        map.set(c.user.username, { username: c.user.username, fullName: c.user.fullName, role: c.user.role });
-    }
-    return Array.from(map.values());
-}
-
-const chatSendLog = new Map();
-function isChatRateLimited(username) {
-    const now = Date.now();
-    const arr = (chatSendLog.get(username) || []).filter(t => now - t < CHAT_RATE_WINDOW_MS);
-    if (arr.length >= CHAT_RATE_COUNT) { chatSendLog.set(username, arr); return true; }
-    arr.push(now);
-    chatSendLog.set(username, arr);
-    return false;
-}
-
 app.get('/api/chat/stream', (req, res) => {
     const user = findChatUser(req.query.username);
-    if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
-    const room = chatRoomOf(req.query.room);
-    if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Bạn không thuộc nhóm Site' });
-
+    if (!user) return res.status(403).json({ success: false, message: 'Unauthorized' });
+    
     res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
+        'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': req.headers.origin || '*'
+        'Access-Control-Allow-Origin': '*'
     });
-    res.write('retry: 3000\n\n');
-
-    const client = { res, user, room };
+    const client = { res, user, room: req.query.site === 'site' ? 'site' : 'general' };
     chatClients.add(client);
-    chatSend(res, 'presence', chatOnlineList(room));
-    chatBroadcast('presence', chatOnlineList(room), room);
 
-    const timer = setInterval(() => {
-        try { res.write(': keepalive\n\n'); } catch (err) { /* ignore */ }
-    }, CHAT_KEEPALIVE_MS);
-
-    req.on('close', () => {
-        clearInterval(timer);
-        chatClients.delete(client);
-        chatBroadcast('presence', chatOnlineList(room), room);
-    });
+    req.on('close', () => chatClients.delete(client));
 });
 
 app.get('/api/chat/history', (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 100, CHAT_MAX_MESSAGES);
-    const room = chatRoomOf(req.query.room);
-    if (room !== 'general') {
-        const user = findChatUser(req.query.username);
-        if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
-        if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Bạn không thuộc nhóm Site' });
-    }
-    const list = chatMessages.filter(m => (m.room || 'general') === room);
-    res.json({ success: true, messages: list.slice(-limit) });
+    res.json({ success: true, messages: chatMessages.slice(-100) });
 });
 
 app.post('/api/chat/send', (req, res) => {
-    const body = req.body || {};
-    const user = findChatUser(body.username);
-    if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
-
-    const room = chatRoomOf(body.room);
-    if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Bạn không thuộc nhóm Site' });
-
-    const text = (typeof body.text === 'string' ? body.text : '').trim();
-    if (!text) return res.status(400).json({ success: false, message: 'Tin nhắn trống' });
-    if (text.length > CHAT_MAX_TEXT) {
-        return res.status(400).json({ success: false, message: `Tin nhắn tối đa ${CHAT_MAX_TEXT} ký tự` });
-    }
-    if (isChatRateLimited(user.username)) {
-        return res.status(429).json({ success: false, message: 'Bạn gửi quá nhanh, vui lòng chậm lại' });
-    }
-
-    const msg = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-        username: user.username,
-        fullName: user.fullName,
-        role: user.role,
-        text,
-        ts: Date.now(),
-        room
-    };
+    const { username, text } = req.body;
+    const user = findChatUser(username);
+    if (!user || !text) return res.status(400).json({ success: false, message: 'Invalid data' });
+    const msg = { id: Date.now().toString(36), username: user.username, fullName: user.fullName, role: user.role, text: text.trim(), ts: Date.now() };
     chatMessages.push(msg);
-    if (chatMessages.length > CHAT_MAX_MESSAGES) chatMessages = chatMessages.slice(-CHAT_MAX_MESSAGES);
     saveChatMessages();
-    chatBroadcast('chat', msg, room);
-
+    
+    chatClients.forEach(c => {
+        try { c.res.write(`event: chat\ndata: ${JSON.stringify(msg)}\n\n`); } catch (e) {}
+    });
     res.json({ success: true, message: msg });
 });
 
@@ -615,8 +387,8 @@ app.post('/api/chat/send', (req, res) => {
 // 9. STATIC SERVE & KHỞI ĐỘNG SERVER
 // ===============================================================
 app.use('/files', express.static(ROOT_DIR));
-app.use('/assets', express.static(path.join(__dirname, 'assets'))); // Phục vụ static cho thư mục assets (avatar, js,...)
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 CDE & Auth Backend Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
+    console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
 });
