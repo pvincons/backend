@@ -1,7 +1,7 @@
 {
-  "name": "pvincons-backend",
+  "name": "pvincons-cde-backend",
   "version": "1.0.0",
-  "description": "Backend API for PV INCONS",
+  "description": "Unified Backend API (Auth, CDE, Issues & Chat) for PV INCONS",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

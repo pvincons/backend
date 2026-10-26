@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PV INCONS - Portal Workspace</title>
+    <meta name="description"
+        content="Cung cấp giải pháp toàn diện từ Tư vấn, Quản lý Đầu tư; Thiết kế Kiến trúc theo tiêu chuẩn số BIM/VDC và Thi công Xây dựng.">
+    <link rel="icon" type="image/webp" href="assets/pic/PVI_CLOUD.webp">
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons CDN -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            color: #f8fafc;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow-x: hidden;
+        }
+
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .module-card {
+            background: rgba(30, 41, 59, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(8px);
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .module-card:hover {
+            background: rgba(30, 41, 59, 0.9);
+            border-color: rgba(255, 255, 255, 0.25);
+            transform: translateY(-2px);
+            box-shadow: 0 12px 24px -10px rgba(0, 0, 0, 0.5);
+        }
+
+        .input-box {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            transition: all 0.2s ease;
+        }
+
+        .input-box:focus-within {
+            border-color: #3b82f6;
+            background: rgba(15, 23, 42, 0.95);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+        }
+    </style>
+</head>
+
+<body class="min-h-screen flex flex-col justify-between relative selection:bg-blue-500 selection:text-white">
+    <video autoplay loop muted playsinline poster="assets/pic/white-cloud-blue-sky-sea.webp"
+        class="fixed inset-0 w-full h-full object-cover -z-20 filter brightness-90">
+        <source src="assets/video/5200649-hd_1920_1080_30fps.mp4" type="video/mp4">
+    </video>
+
+    <div class="fixed inset-0 bg-slate-950/20 backdrop-blur-[2px] -z-10"></div>
+
+    <!-- HEADER -->
+    <header class="w-full max-w-5xl mx-auto px-4 pt-6 pb-2 z-10 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <img src="./assets/pic/PVI_CLOUD.webp" alt="PV INCONS Logo" class="h-9 w-auto object-contain" />
+            <div>
+                <h1 class="font-extrabold text-white text-base leading-none tracking-wider flex items-center gap-2">
+                    PV INCONS <span class="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded border border-blue-500/30 font-semibold">CDE</span>
+                </h1>
+                <p class="text-[9px] text-slate-400 font-medium tracking-widest mt-1">ENTERPRISE WORKSPACE</p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[11px] bg-slate-900/80 border border-white/10 text-slate-200 shadow-sm backdrop-blur-md font-medium">
+                <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span id="onlineCounter">76</span><i class="fa-solid fa-user text-xs text-slate-300"></i>| System Online
+            </span>
+        </div>
+    </header>
+
+    <!-- MAIN CONTAINER -->
+    <main class="w-full max-w-md lg:max-w-5xl mx-auto px-3 py-4 z-10 my-auto">
+        <div class="glass-panel rounded-3xl overflow-hidden shadow-2xl">
+            <div class="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-white/10">
+
+                <!-- CHỌN PHÂN HỆ -->
+                <section class="p-6 sm:p-8 flex flex-col justify-center">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-xs font-bold text-slate-300 uppercase tracking-[0.2em] flex items-center gap-2">
+                            <i class="fa-solid fa-layer-group text-blue-400"></i> CHỌN PHÂN HỆ LÀM VIỆC
+                        </h2>
+                        <span class="text-[10px] text-slate-400 font-mono">WORKSPACE</span>
+                    </div>
+
+                    <div class="space-y-4">
+                        <a href="content/partner/index.html" class="module-card p-4 rounded-2xl flex items-center justify-between cursor-pointer group">
+                            <div class="flex items-center gap-4">
+                                <div class="w-12 h-12 rounded-xl bg-orange-500/10 border border-orange-500/30 text-orange-400 flex items-center justify-center text-xl shrink-0 group-hover:scale-105 transition-transform">
+                                    <i class="fa-solid fa-handshake"></i>
+                                </div>
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <h3 class="font-bold text-sm text-white tracking-wide group-hover:text-orange-300 transition-colors">KHÁCH HÀNG</h3>
+                                        <span class="text-[10px] bg-orange-500/20 text-orange-300 border border-orange-500/30 px-2 py-0.5 rounded-md font-semibold">Public</span>
+                                    </div>
+                                    <p class="text-xs text-slate-300 mt-1">Cổng dịch vụ Khách hàng</p>
+                                </div>
+                            </div>
+                            <i class="fa-solid fa-chevron-right text-xs text-slate-400 group-hover:text-orange-400 transition-colors pl-2"></i>
+                        </a>
+
+                        <div onclick="selectModule('BIM - VDC')" class="module-card p-4 rounded-2xl flex items-center justify-between cursor-pointer group">
+                            <div class="flex items-center gap-4">
+                                <div class="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-400 flex items-center justify-center text-xl shrink-0 group-hover:scale-105 transition-transform">
+                                    <i class="fa-solid fa-cubes"></i>
+                                </div>
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <h3 class="font-bold text-sm text-white tracking-wide group-hover:text-blue-300 transition-colors">BIM - VDC</h3>
+                                        <span class="text-[10px] bg-blue-500/20 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded-md font-semibold">Khóa CDE</span>
+                                    </div>
+                                    <p class="text-xs text-slate-300 mt-1">Cơ sở dữ liệu kỹ thuật dự án</p>
+                                </div>
+                            </div>
+                            <i class="fa-solid fa-lock text-xs text-slate-400 group-hover:text-blue-400 transition-colors pl-2"></i>
+                        </div>
+
+                        <div onclick="selectModule('Quản lý nội bộ')" class="module-card p-4 rounded-2xl flex items-center justify-between cursor-pointer group">
+                            <div class="flex items-center gap-4">
+                                <div class="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center text-xl shrink-0 group-hover:scale-105 transition-transform">
+                                    <i class="fa-solid fa-folder-closed"></i>
+                                </div>
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <h3 class="font-bold text-sm text-white tracking-wide group-hover:text-emerald-300 transition-colors">QUẢN LÝ NỘI BỘ</h3>
+                                        <span class="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-md font-semibold">Khóa Nội bộ</span>
+                                    </div>
+                                    <p class="text-xs text-slate-300 mt-1">Quy trình SOP & Form mẫu chuẩn</p>
+                                </div>
+                            </div>
+                            <i class="fa-solid fa-lock text-xs text-slate-400 group-hover:text-emerald-400 transition-colors pl-2"></i>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ĐĂNG NHẬP FORM -->
+                <section class="p-6 sm:p-8 bg-slate-950/30 lg:bg-transparent flex flex-col justify-center">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="font-bold text-sm text-white tracking-wider flex items-center gap-2">
+                            <i class="fa-solid fa-user-shield text-blue-400"></i> ĐĂNG NHẬP TÀI KHOẢN
+                        </h2>
+                        <span class="text-xs text-slate-400 font-mono">SSO Portal</span>
+                    </div>
+
+                    <form id="loginForm" class="space-y-4">
+                        <div class="input-box rounded-xl px-4 py-3.5 flex items-center gap-3">
+                            <i class="fa-regular fa-user text-slate-400 text-sm w-4 text-center"></i>
+                            <input type="text" id="username" placeholder="Tên đăng nhập / Mã NV" required
+                                class="bg-transparent text-base sm:text-sm text-white placeholder-slate-400 w-full focus:outline-none font-medium">
+                        </div>
+
+                        <div class="input-box rounded-xl px-4 py-3.5 flex items-center gap-3">
+                            <i class="fa-solid fa-lock text-slate-400 text-sm w-4 text-center"></i>
+                            <input type="password" id="password" placeholder="Mật khẩu" required
+                                class="bg-transparent text-base sm:text-sm text-white placeholder-slate-400 w-full focus:outline-none font-medium">
+                            <button type="button" onclick="togglePassword()" class="text-slate-400 hover:text-white transition-colors">
+                                <i id="eyeIcon" class="fa-regular fa-eye text-sm"></i>
+                            </button>
+                        </div>
+
+                        <button type="submit" id="submitBtn"
+                            class="w-full py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-500 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider uppercase rounded-xl shadow-lg shadow-blue-600/30 transition-all duration-200 mt-2 flex items-center justify-center gap-2 active:scale-[0.99]">
+                            <span>ĐĂNG NHẬP SUB-WORKSPACE</span>
+                            <i class="fa-solid fa-arrow-right-to-bracket text-xs"></i>
+                        </button>
+                    </form>
+                </section>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="w-full max-w-5xl mx-auto px-4 py-4 z-10 flex flex-col sm:flex-row items-center justify-between border-t border-white/10 text-xs text-slate-300 gap-2 font-medium">
+        <div>
+            &copy; 2026 <span class="text-white font-semibold">PV INCONS Enterprise Workspace</span>. All rights reserved.
+        </div>
+        <div class="flex items-center gap-4 text-[11px]">
+            <a href="#" class="hover:text-white transition-colors">Chính sách bảo mật</a>
+            <span>•</span>
+            <a href="#" class="hover:text-white transition-colors">Hỗ trợ kỹ thuật</a>
+            <span>•</span>
+            <span class="font-mono text-slate-400">v2.6.0-prod</span>
+        </div>
+    </footer>
+
+    <!-- INTERACTIVE JAVASCRIPT -->
+    <script>
+        function togglePassword() {
+            const pwdInput = document.getElementById('password');
+            const eyeIcon = document.getElementById('eyeIcon');
+            if (pwdInput.type === 'password') {
+                pwdInput.type = 'text';
+                eyeIcon.classList.replace('fa-eye', 'fa-eye-slash');
+            } else {
+                pwdInput.type = 'password';
+                eyeIcon.classList.replace('fa-eye-slash', 'fa-eye');
+            }
+        }
+
+        function selectModule(name) {
+            document.getElementById('username').focus();
+        }
+
+        (function simulateOnlineUsers() {
+            let onlineUsers = Math.floor(Math.random() * (100 - 80 + 1)) + 60;
+            const counterEl = document.getElementById('onlineCounter');
+
+            if (counterEl) {
+                counterEl.textContent = onlineUsers;
+
+                function updateCount() {
+                    const delta = Math.floor(Math.random() * 7) - 3;
+                    onlineUsers = Math.max(45, Math.min(220, onlineUsers + delta));
+                    counterEl.textContent = onlineUsers;
+
+                    const randomTime = Math.floor(Math.random() * 3000) + 3000;
+                    setTimeout(updateCount, randomTime);
+                }
+
+                setTimeout(updateCount, 3000);
+            }
+        })();
+    </script>
+
+    <!-- Cấu hình hệ thống chung -->
+    <script src="assets/js/config.js"></script>
+    <!-- Tải mã đăng nhập đã sửa -->
+    <script src="assets/js/login.js"></script>
+</body>
+
+</html>
