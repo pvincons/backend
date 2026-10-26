@@ -5,21 +5,35 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const multer = require('multer');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
 
 app.set('trust proxy', true);
-app.use(cors());
+// Giới hạn CORS bằng biến môi trường CORS_ORIGIN (vd: https://cde.example.com,http://localhost:5500). Bỏ trống = cho phép tất cả.
+app.use(cors(process.env.CORS_ORIGIN
+    ? { origin: process.env.CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean) }
+    : undefined));
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'PV_INCONS_SECRET_KEY_2026';
+// ---- Cấu hình xác thực ----
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    JWT_SECRET = crypto.randomBytes(48).toString('hex');
+    console.warn('⚠️ Chưa đặt JWT_SECRET trong .env — đang dùng khóa tạm ngẫu nhiên, mọi phiên đăng nhập sẽ mất khi server khởi động lại!');
+} else if (JWT_SECRET.length < 32) {
+    console.warn('⚠️ JWT_SECRET quá ngắn (< 32 ký tự), nên dùng chuỗi ngẫu nhiên dài hơn.');
+}
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
+const JWT_ISSUER = 'pv-incons-cde';
 const USER_FILE_PATH = path.join(__dirname, 'assets', 'data', 'users.json');
 
 // Middleware ghi log request thời gian thực
 app.use((req, res, next) => {
-    console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
+    const safeUrl = req.url.replace(/([?&]token=)[^&]*/gi, '$1***'); // không ghi token vào log
+    console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${safeUrl}`);
     next();
 });
 
@@ -32,7 +46,8 @@ if (!fs.existsSync(dirPath)) {
 }
 
 if (!fs.existsSync(USER_FILE_PATH)) {
-    const defaultPasswordHash = bcrypt.hashSync("123456", 10);
+    const initialPassword = crypto.randomBytes(9).toString('base64url');
+    const defaultPasswordHash = bcrypt.hashSync(initialPassword, 10);
     const defaultUsers = [
         {
             username: "admin",
@@ -45,42 +60,197 @@ if (!fs.existsSync(USER_FILE_PATH)) {
         }
     ];
     fs.writeFileSync(USER_FILE_PATH, JSON.stringify(defaultUsers, null, 2), 'utf8');
+    console.log(`🔑 Đã tạo users.json mới. Tài khoản: admin | Mật khẩu ban đầu: ${initialPassword} (hãy đổi ngay)`);
 }
 
-app.post('/api/auth/login', (req, res) => {
+// ---------- Đọc users.json (có cache theo thời gian sửa file) ----------
+let usersCache = { mtimeMs: 0, list: [] };
+function loadUsers() {
     try {
-        const { username, password } = req.body;
-        if (!username || !password) {
+        const st = fs.statSync(USER_FILE_PATH);
+        if (st.mtimeMs !== usersCache.mtimeMs) {
+            const parsed = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+            usersCache = { mtimeMs: st.mtimeMs, list: Array.isArray(parsed) ? parsed : [] };
+        }
+    } catch (err) {
+        console.error('Lỗi đọc users.json:', err.message);
+    }
+    return usersCache.list;
+}
+
+function normalizeUsername(v) {
+    return typeof v === 'string' ? v.trim().toLowerCase().slice(0, 100) : '';
+}
+
+function findUser(username) {
+    const key = normalizeUsername(username);
+    if (!key) return null;
+    return loadUsers().find(u => typeof u.username === 'string' && u.username.trim().toLowerCase() === key) || null;
+}
+
+// Tài khoản bị vô hiệu hóa: đặt "disabled": true, "active": false hoặc status chứa các từ khóa dưới đây
+const INACTIVE_KEYWORDS = ['ngừng', 'nghỉ việc', 'khóa', 'vô hiệu', 'disabled', 'inactive', 'locked'];
+function isActive(user) {
+    if (user.disabled === true || user.active === false) return false;
+    const status = String(user.status || '').toLowerCase();
+    return !INACTIVE_KEYWORDS.some(k => status.includes(k));
+}
+
+// Hồ sơ trả về client: đầy đủ trường nhưng KHÔNG có passwordHash
+function publicUser(user) {
+    const { passwordHash, ...rest } = user;
+    return { ...rest, role: String(rest.role || '').toUpperCase() };
+}
+
+// ---------- Chống dò mật khẩu (giới hạn số lần sai) ----------
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_PER_IP_USER = 5;   // sai 5 lần từ cùng IP + cùng tài khoản
+const LOGIN_MAX_PER_USER = 15;     // sai 15 lần vào cùng tài khoản (kể cả đổi IP)
+const loginFails = new Map();
+
+function lockRemainingMs(rules) {
+    const now = Date.now();
+    let wait = 0;
+    for (const { key, max } of rules) {
+        const s = loginFails.get(key);
+        if (!s) continue;
+        if (now - s.first > LOGIN_WINDOW_MS) { loginFails.delete(key); continue; }
+        if (s.count >= max) wait = Math.max(wait, LOGIN_WINDOW_MS - (now - s.first));
+    }
+    return wait;
+}
+function recordFail(rules) {
+    const now = Date.now();
+    for (const { key } of rules) {
+        const s = loginFails.get(key);
+        if (!s || now - s.first > LOGIN_WINDOW_MS) loginFails.set(key, { count: 1, first: now });
+        else s.count++;
+    }
+}
+function clearFails(rules) {
+    for (const { key } of rules) loginFails.delete(key);
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, s] of loginFails) if (now - s.first > LOGIN_WINDOW_MS) loginFails.delete(k);
+}, 10 * 60 * 1000).unref();
+
+// Hash giả để thời gian phản hồi giống nhau dù tài khoản có tồn tại hay không
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(8).toString('hex'), 10);
+
+// ---------- Middleware xác thực ----------
+function extractToken(req) {
+    const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+    if (m) return m[1].trim();
+    // EventSource (SSE chat) không gửi được header nên chỉ riêng route này nhận token qua query
+    if (req.path === '/chat/stream' && typeof req.query.token === 'string') return req.query.token;
+    return null;
+}
+
+function requireAuth(req, res, next) {
+    const token = extractToken(req);
+    if (!token) {
+        return res.status(401).json({ success: false, code: 'NO_TOKEN', error: 'Bạn chưa đăng nhập!' });
+    }
+
+    let payload;
+    try {
+        payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], issuer: JWT_ISSUER });
+    } catch (err) {
+        const expired = err.name === 'TokenExpiredError';
+        return res.status(401).json({
+            success: false,
+            code: expired ? 'TOKEN_EXPIRED' : 'TOKEN_INVALID',
+            error: expired ? 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại!' : 'Phiên đăng nhập không hợp lệ!'
+        });
+    }
+
+    // Role và trạng thái luôn lấy từ users.json hiện tại (đổi role / khóa tài khoản có hiệu lực ngay)
+    const user = findUser(payload.username);
+    if (!user || !isActive(user)) {
+        return res.status(401).json({ success: false, code: 'ACCOUNT_INVALID', error: 'Tài khoản không còn hiệu lực!' });
+    }
+
+    req.user = publicUser(user);
+    next();
+}
+
+// Dùng khi cần giới hạn theo vai trò, ví dụ: app.post('/api/delete', requireRole('MASTER'), ...) — ADMIN luôn được qua
+function requireRole(...roles) {
+    return (req, res, next) => {
+        if (req.user && (req.user.role === 'ADMIN' || roles.includes(req.user.role))) return next();
+        res.status(403).json({ success: false, code: 'FORBIDDEN', error: 'Bạn không có quyền thực hiện thao tác này!' });
+    };
+}
+
+// ---------- API công khai: đăng nhập & kiểm tra sức khỏe ----------
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const uname = normalizeUsername(body.username);
+        const password = typeof body.password === 'string' ? body.password : '';
+
+        if (!uname || !password) {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập đầy đủ tài khoản và mật khẩu!' });
         }
 
-        const data = fs.readFileSync(USER_FILE_PATH, 'utf8');
-        const users = JSON.parse(data || '[]');
-        const user = users.find(u => u.username === username);
+        const rules = [
+            { key: `ip:${req.ip}|${uname}`, max: LOGIN_MAX_PER_IP_USER },
+            { key: `user:${uname}`, max: LOGIN_MAX_PER_USER }
+        ];
+        const wait = lockRemainingMs(rules);
+        if (wait > 0) {
+            res.set('Retry-After', String(Math.ceil(wait / 1000)));
+            return res.status(429).json({
+                success: false,
+                error: `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${Math.ceil(wait / 60000)} phút!`
+            });
+        }
 
-        if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
+        const user = findUser(uname);
+        const hash = user && typeof user.passwordHash === 'string' ? user.passwordHash : DUMMY_HASH;
+        let passOk = false;
+        try {
+            passOk = password.length <= 128 && await bcrypt.compare(password, hash);
+        } catch (err) {
+            console.error(`Hash không hợp lệ của tài khoản "${uname}":`, err.message);
+        }
+
+        if (!user || !passOk) {
+            recordFail(rules);
             return res.status(401).json({ success: false, error: 'Tài khoản hoặc mật khẩu không chính xác!' });
         }
 
-        const tokenPayload = {
-            username: user.username,
-            fullName: user.fullName,
-            role: user.role,
-            position: user.position,
-            company: user.company
-        };
+        if (!isActive(user)) {
+            return res.status(403).json({ success: false, error: 'Tài khoản đã bị vô hiệu hóa, vui lòng liên hệ quản trị viên!' });
+        }
 
-        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '8h' });
+        clearFails(rules);
 
-        res.json({
-            success: true,
-            message: 'Đăng nhập thành công!',
-            token: token,
-            user: tokenPayload
-        });
+        const info = publicUser(user);
+        const token = jwt.sign(
+            { username: user.username, fullName: user.fullName, role: info.role, position: user.position, company: user.company },
+            JWT_SECRET,
+            { algorithm: 'HS256', expiresIn: JWT_EXPIRES_IN, issuer: JWT_ISSUER }
+        );
+
+        res.json({ success: true, message: 'Đăng nhập thành công!', token, user: info });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        console.error('Lỗi đăng nhập:', error);
+        res.status(500).json({ success: false, error: 'Lỗi hệ thống, vui lòng thử lại sau!' });
     }
+});
+
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', message: 'CDE Unified Backend Server đang hoạt động ổn định!' });
+});
+
+// ---------- TỪ ĐÂY TRỞ XUỐNG: mọi API /api/* đều yêu cầu token hợp lệ ----------
+app.use('/api', requireAuth);
+
+// Client dùng để xác minh phiên và lấy hồ sơ mới nhất
+app.get('/api/auth/me', (req, res) => {
+    res.json({ success: true, user: req.user });
 });
 
 // ===============================================================
@@ -100,10 +270,6 @@ app.use(
         }
     })
 );
-
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'CDE Unified Backend Server đang hoạt động ổn định!' });
-});
 
 // ===============================================================
 // 3. NHÓM QUẢN LÝ DỰ ÁN & TẬP TIN CDE (FILE SYSTEM & ISO 19650)
@@ -432,21 +598,15 @@ function saveChatMessages() {
     } catch (err) {}
 }
 
-function findChatUser(username) {
-    if (!username || typeof username !== 'string') return null;
-    try {
-        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8'));
-        const u = users.find(x => x.username === username);
-        if (!u) return null;
-        return {
-            username: u.username,
-            fullName: u.fullName || u.username,
-            role: (u.role || '').toString().toUpperCase(),
-            groups: Array.isArray(u.groups) ? u.groups.map(g => String(g).toLowerCase()) : []
-        };
-    } catch (err) {
-        return null;
-    }
+// Danh tính chat lấy từ token đã xác thực (req.user), KHÔNG tin username do client gửi
+function toChatUser(u) {
+    if (!u) return null;
+    return {
+        username: u.username,
+        fullName: u.fullName || u.username,
+        role: (u.role || '').toString().toUpperCase(),
+        groups: Array.isArray(u.groups) ? u.groups.map(g => String(g).toLowerCase()) : []
+    };
 }
 
 const CHAT_SITE_ROLES = ['ADMIN', 'MASTER'];
@@ -488,7 +648,7 @@ function isChatRateLimited(username) {
 }
 
 app.get('/api/chat/stream', (req, res) => {
-    const user = findChatUser(req.query.username);
+    const user = toChatUser(req.user);
     if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
     const room = chatRoomOf(req.query.room);
     if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Bạn không thuộc nhóm Site' });
@@ -522,7 +682,7 @@ app.get('/api/chat/history', (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, CHAT_MAX_MESSAGES);
     const room = chatRoomOf(req.query.room);
     if (room !== 'general') {
-        const user = findChatUser(req.query.username);
+        const user = toChatUser(req.user);
         if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
         if (!canJoinChatRoom(user, room)) return res.status(403).json({ success: false, message: 'Bạn không thuộc nhóm Site' });
     }
@@ -532,7 +692,7 @@ app.get('/api/chat/history', (req, res) => {
 
 app.post('/api/chat/send', (req, res) => {
     const body = req.body || {};
-    const user = findChatUser(body.username);
+    const user = toChatUser(req.user);
     if (!user) return res.status(403).json({ success: false, message: 'Tài khoản không hợp lệ' });
 
     const room = chatRoomOf(body.room);
@@ -574,6 +734,11 @@ app.post('/api/upload-avatar', (req, res) => {
             return res.status(400).json({ success: false, error: 'Thiếu tên file hoặc dữ liệu ảnh!' });
         }
 
+        const safeName = path.basename(String(fileName));
+        if (typeof image !== 'string' || !/^[\p{L}\p{N}_.\- ]+\.(png|jpe?g|gif|webp)$/iu.test(safeName)) {
+            return res.status(400).json({ success: false, error: 'Tên file hoặc định dạng ảnh không hợp lệ!' });
+        }
+
         const avatarDir = path.join(__dirname, 'assets', 'data', 'avatar');
         if (!fs.existsSync(avatarDir)) {
             fs.mkdirSync(avatarDir, { recursive: true });
@@ -581,15 +746,15 @@ app.post('/api/upload-avatar', (req, res) => {
 
         // Tách chuỗi Base64 để lưu file nhị phân
         const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
-        const filePath = path.join(avatarDir, fileName);
+        const filePath = path.join(avatarDir, safeName);
 
         fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
-        console.log(`[AVATAR UPLOAD] Đã lưu thành công: ${fileName}`);
+        console.log(`[AVATAR UPLOAD] Đã lưu thành công: ${safeName}`);
 
         res.json({ 
             success: true, 
             message: 'Tải lên avatar thành công!', 
-            path: `assets/data/avatar/${fileName}` 
+            path: `assets/data/avatar/${safeName}` 
         });
     } catch (error) {
         console.error('Lỗi upload avatar:', error);
