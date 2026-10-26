@@ -344,6 +344,23 @@ function saveChatMessages() {
     } catch (e) {}
 }
 
+function findChatUser(username) {
+    if (!username || typeof username !== 'string') return null;
+    try {
+        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8'));
+        const u = users.find(x => x.username === username);
+        if (!u) return null;
+        return {
+            username: u.username,
+            fullName: u.fullName || u.username,
+            role: (u.role || '').toString().toUpperCase(),
+            groups: Array.isArray(u.groups) ? u.groups.map(g => String(g).toLowerCase()) : []
+        };
+    } catch (e) {
+        return null;
+    }
+}
+
 const chatClients = new Set();
 
 function chatSend(res, event, data) {
