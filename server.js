@@ -15,7 +15,7 @@ const app = express();
 // ===============================================================
 app.set('trust proxy', true);
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Tăng giới hạn nhận payload để upload ảnh base64 lớn
 
 const JWT_SECRET = process.env.JWT_SECRET || 'PV_INCONS_SECRET_KEY_2026';
 const PORT = process.env.PORT || 3000;
@@ -30,15 +30,23 @@ app.use((req, res, next) => {
 // 2. KHỞI TẠO CÁC THƯ MỤC & DỮ LIỆU MẶC ĐỊNH
 // ===============================================================
 const USER_FILE_PATH = path.join(__dirname, 'assets', 'data', 'users.json');
+const AVATAR_DIR = path.join(__dirname, 'assets', 'data', 'avatar');
 const BASE_DATABASE_DIR = path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
 
-// Đảm bảo thư mục assets/data và users.json tồn tại
-const userDir = path.dirname(USER_FILE_PATH);
-if (!fs.existsSync(userDir)) {
-    fs.mkdirSync(userDir, { recursive: true });
+// Đảm bảo các thư mục cần thiết tồn tại
+if (!fs.existsSync(path.dirname(USER_FILE_PATH))) {
+    fs.mkdirSync(path.dirname(USER_FILE_PATH), { recursive: true });
 }
+if (!fs.existsSync(AVATAR_DIR)) {
+    fs.mkdirSync(AVATAR_DIR, { recursive: true });
+}
+if (!fs.existsSync(ROOT_DIR)) {
+    fs.mkdirSync(ROOT_DIR, { recursive: true });
+}
+
+// Khởi tạo users.json mặc định nếu chưa có
 if (!fs.existsSync(USER_FILE_PATH)) {
     const defaultPasswordHash = bcrypt.hashSync("123456", 10);
     const defaultUsers = [
@@ -54,11 +62,6 @@ if (!fs.existsSync(USER_FILE_PATH)) {
         }
     ];
     fs.writeFileSync(USER_FILE_PATH, JSON.stringify(defaultUsers, null, 2), 'utf8');
-}
-
-// Đảm bảo thư mục database/bim-vdc tồn tại
-if (!fs.existsSync(ROOT_DIR)) {
-    fs.mkdirSync(ROOT_DIR, { recursive: true });
 }
 
 // ===============================================================
@@ -120,7 +123,35 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // ===============================================================
-// 5. API QUẢN LÝ VẤN ĐỀ & QA-QC (ISSUES API)
+// 5. API UPLOAD AVATAR NGƯỜI DÙNG
+// ===============================================================
+app.post('/api/upload-avatar', (req, res) => {
+    try {
+        const { fileName, image } = req.body;
+        if (!fileName || !image) {
+            return res.status(400).json({ success: false, error: 'Thiếu tên file hoặc dữ liệu ảnh!' });
+        }
+
+        const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const filePath = path.join(AVATAR_DIR, fileName);
+
+        fs.writeFileSync(filePath, buffer);
+
+        console.log(`[AVATAR SYNC] Đã lưu ảnh đại diện thành công: assets/data/avatar/${fileName}`);
+        res.json({
+            success: true,
+            message: 'Tải lên avatar thành công!',
+            path: `assets/data/avatar/${fileName}`
+        });
+    } catch (error) {
+        console.error('Lỗi lưu avatar:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ===============================================================
+// 6. API QUẢN LÝ VẤN ĐỀ & QA-QC (ISSUES API)
 // ===============================================================
 function readIssuesDB() {
     try {
@@ -204,7 +235,7 @@ app.post('/api/issues/delete', (req, res) => {
 });
 
 // ===============================================================
-// 6. API QUẢN LÝ TẬP TIN & CDE (FILE SYSTEM & ISO 19650)
+// 7. API QUẢN LÝ TẬP TIN & CDE (FILE SYSTEM & ISO 19650)
 // ===============================================================
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -409,7 +440,7 @@ app.post('/api/copy', (req, res) => {
 });
 
 // ===============================================================
-// 7. HỆ THỐNG CHAT REALTIME (SSE API)
+// 8. HỆ THỐNG CHAT REALTIME (SSE API)
 // ===============================================================
 const CHAT_DATA_DIR = process.env.CHAT_DATA_DIR || path.join(__dirname, '..', 'CDE_CHAT_DATA');
 const CHAT_LEGACY_FILE = path.join(BASE_DATABASE_DIR, 'chat.json');
@@ -581,9 +612,10 @@ app.post('/api/chat/send', (req, res) => {
 });
 
 // ===============================================================
-// 8. STATIC SERVE & KHỞI ĐỘNG SERVER
+// 9. STATIC SERVE & KHỞI ĐỘNG SERVER
 // ===============================================================
 app.use('/files', express.static(ROOT_DIR));
+app.use('/assets', express.static(path.join(__dirname, 'assets'))); // Phục vụ static cho thư mục assets (avatar, js,...)
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 CDE & Auth Backend Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
