@@ -322,64 +322,109 @@ const CHAT_LEGACY_FILE = path.join(BASE_DATABASE_DIR, 'chat.json');
 let chatFilePath = path.join(CHAT_DATA_DIR, 'chat.json');
 try {
     fs.mkdirSync(CHAT_DATA_DIR, { recursive: true });
-    if (!fs.existsSync(chatFilePath) && fs.existsSync(CHAT_LEGACY_FILE)) fs.copyFileSync(CHAT_LEGACY_FILE, chatFilePath);
-} catch (err) { chatFilePath = CHAT_LEGACY_FILE; }
+    if (!fs.existsSync(chatFilePath) && fs.existsSync(CHAT_LEGACY_FILE)) {
+        fs.copyFileSync(CHAT_LEGACY_FILE, chatFilePath);
+    }
+} catch (err) {
+    chatFilePath = CHAT_LEGACY_FILE;
+}
 
+const CHAT_MAX_MESSAGES = 1000;
 let chatMessages = [];
 try {
     const parsed = JSON.parse(fs.readFileSync(chatFilePath, 'utf8'));
-    if (Array.isArray(parsed)) chatMessages = parsed.slice(-1000);
+    if (Array.isArray(parsed)) chatMessages = parsed.slice(-CHAT_MAX_MESSAGES);
 } catch (e) {}
 
 function saveChatMessages() {
     try {
-        fs.writeFileSync(chatFilePath + '.tmp', JSON.stringify(chatMessages));
-        fs.renameSync(chatFilePath + '.tmp', chatFilePath);
+        const tmp = chatFilePath + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(chatMessages));
+        fs.renameSync(tmp, chatFilePath);
     } catch (e) {}
 }
 
-function findChatUser(username) {
-    if (!username) return null;
-    try {
-        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8'));
-        const u = users.find(x => x.username === username);
-        if (!u) return null;
-        return { username: u.username, fullName: u.fullName || u.username, role: (u.role || '').toUpperCase(), groups: u.groups || [] };
-    } catch (e) { return null; }
+const chatClients = new Set();
+
+function chatSend(res, event, data) {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-const chatClients = new Set();
+function chatBroadcast(event, data, room) {
+    for (const c of chatClients) {
+        if (room && c.room !== room) continue;
+        try { chatSend(c.res, event, data); } catch (e) {}
+    }
+}
+
+function chatOnlineList(room) {
+    const map = new Map();
+    for (const c of chatClients) {
+        if (room && c.room !== room) continue;
+        map.set(c.user.username, { username: c.user.username, fullName: c.user.fullName, role: c.user.role });
+    }
+    return Array.from(map.values());
+}
+
 app.get('/api/chat/stream', (req, res) => {
     const user = findChatUser(req.query.username);
     if (!user) return res.status(403).json({ success: false, message: 'Unauthorized' });
-    
+
+    const room = req.query.room === 'site' ? 'site' : 'general';
+
     res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
         'Access-Control-Allow-Origin': '*'
     });
-    const client = { res, user, room: req.query.site === 'site' ? 'site' : 'general' };
+    res.write('retry: 3000\n\n');
+
+    const client = { res, user, room };
     chatClients.add(client);
 
-    req.on('close', () => chatClients.delete(client));
+    // Gửi danh sách online ngay khi kết nối thành công
+    chatSend(res, 'presence', chatOnlineList(room));
+    chatBroadcast('presence', chatOnlineList(room), room);
+
+    const keepAliveTimer = setInterval(() => {
+        try { res.write(': keepalive\n\n'); } catch (e) {}
+    }, 25000);
+
+    req.on('close', () => {
+        clearInterval(keepAliveTimer);
+        chatClients.delete(client);
+        chatBroadcast('presence', chatOnlineList(room), room);
+    });
 });
 
 app.get('/api/chat/history', (req, res) => {
-    res.json({ success: true, messages: chatMessages.slice(-100) });
+    const room = req.query.room === 'site' ? 'site' : 'general';
+    const list = chatMessages.filter(m => (m.room || 'general') === room);
+    res.json({ success: true, messages: list.slice(-100) });
 });
 
 app.post('/api/chat/send', (req, res) => {
-    const { username, text } = req.body;
+    const { username, text, room: reqRoom } = req.body;
     const user = findChatUser(username);
     if (!user || !text) return res.status(400).json({ success: false, message: 'Invalid data' });
-    const msg = { id: Date.now().toString(36), username: user.username, fullName: user.fullName, role: user.role, text: text.trim(), ts: Date.now() };
+
+    const room = reqRoom === 'site' ? 'site' : 'general';
+    const msg = {
+        id: Date.now().toString(36) + Math.random().toString(36).substring(2, 7),
+        username: user.username,
+        fullName: user.fullName,
+        role: user.role,
+        text: text.trim(),
+        ts: Date.now(),
+        room
+    };
+
     chatMessages.push(msg);
+    if (chatMessages.length > CHAT_MAX_MESSAGES) chatMessages.shift();
     saveChatMessages();
-    
-    chatClients.forEach(c => {
-        try { c.res.write(`event: chat\ndata: ${JSON.stringify(msg)}\n\n`); } catch (e) {}
-    });
+
+    chatBroadcast('chat', msg, room);
     res.json({ success: true, message: msg });
 });
 
