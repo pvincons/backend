@@ -2,7 +2,7 @@
   {
     "id": 1,
     "username": "admin",
-    "passwordHash": "$2b$10$HRYr8EoqLcZtU4c9I3JVz.XTehsbVYtjybAgmexdVNhChxy5fFgBy",
+    "passwordHash": "$2b$10$NjU0MzIx...HASHED...6",
     "role": "ADMIN",
     "permission": "ADMIN",
     "avatarLink": "",
@@ -17,7 +17,7 @@
   {
     "id": 2,
     "username": "master",
-    "passwordHash": "$2b$10$Mhg7uk2abtNcK8/yqU1ZFOzT7mPAdzbjK9zPJMX18cF/yalhrIpSa",
+    "passwordHash": "$2b$10$u4FGP2YC6djwDYd0t6erle9gFQbSGlrH8/2.cz2.OjsTflIcEDlsu",
     "role": "MASTER",
     "permission": "MASTER",
     "avatarLink": "",
