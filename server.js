@@ -34,6 +34,7 @@ const AVATAR_DIR = path.join(__dirname, 'assets', 'data', 'avatar');
 const BASE_DATABASE_DIR = path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
+const RECALLS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'recalls.json');
 
 // Đảm bảo thư mục tồn tại
 if (!fs.existsSync(path.dirname(USER_FILE_PATH))) {
@@ -166,6 +167,37 @@ function writeIssuesDB(dbData) {
     }
 }
 
+// Issue được lưu theo ĐƯỜNG DẪN file. Khi file đổi tên / chuyển Gate (di chuyển container),
+// phải chuyển khóa issue sang đường dẫn mới, nếu không issue cũ bị "mồ côi" và mất khỏi file.
+function rekeyIssues(oldPath, newPath) {
+    const oldKey = normRecallKey(oldPath);
+    const newKey = normRecallKey(newPath);
+    const db = readIssuesDB();
+    let changed = false;
+    Object.keys(db).forEach(k => {
+        const nk = normRecallKey(k);
+        if (nk === oldKey || nk.startsWith(oldKey + '/')) {
+            const target = newKey + nk.slice(oldKey.length);
+            db[target] = (db[target] || []).concat(db[k]); // nối tiếp nếu đích đã có issue
+            if (target !== k) delete db[k];
+            changed = true;
+        }
+    });
+    if (changed) writeIssuesDB(db);
+}
+
+// Xóa file/thư mục: dọn luôn issue tương ứng
+function removeIssues(targetPath) {
+    const key = normRecallKey(targetPath);
+    const db = readIssuesDB();
+    let changed = false;
+    Object.keys(db).forEach(k => {
+        const nk = normRecallKey(k);
+        if (nk === key || nk.startsWith(key + '/')) { delete db[k]; changed = true; }
+    });
+    if (changed) writeIssuesDB(db);
+}
+
 app.get('/api/issues', (req, res) => {
     try { res.json(readIssuesDB()); } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
@@ -193,6 +225,151 @@ app.post('/api/issues/delete', (req, res) => {
             return res.json({ success: true, message: 'Đã xóa Issue!', issues: db[filePath] || [] });
         }
         res.status(404).json({ success: false, error: 'Không tìm thấy Issue!' });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// ===============================================================
+// 6b. API THU HỒI FILE (RECALL API)
+// ===============================================================
+// Cấu trúc recalls.json: { "database/bim-vdc/...": { by, at, reason } }
+function readRecallsDB() {
+    try {
+        if (fs.existsSync(RECALLS_FILE_PATH)) {
+            return JSON.parse(fs.readFileSync(RECALLS_FILE_PATH, 'utf8') || '{}');
+        }
+    } catch (err) {
+        console.error('Lỗi đọc recalls.json:', err);
+    }
+    return {};
+}
+
+function writeRecallsDB(dbData) {
+    try {
+        fs.writeFileSync(RECALLS_FILE_PATH, JSON.stringify(dbData, null, 2), 'utf8');
+        return true;
+    } catch (err) {
+        console.error('Lỗi ghi recalls.json:', err);
+        return false;
+    }
+}
+
+// Chuẩn hóa mọi đường dẫn về dạng "database/bim-vdc/..."
+function normRecallKey(p) {
+    const rel = String(p || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/^database\/bim-vdc\/?/, '').replace(/\/+$/, '');
+    return rel ? 'database/bim-vdc/' + rel : 'database/bim-vdc';
+}
+
+// Đổi tên/di chuyển: chuyển khóa thu hồi sang đường dẫn mới (gồm cả file con nếu là thư mục)
+function rekeyRecalls(oldPath, newPath) {
+    const oldKey = normRecallKey(oldPath);
+    const newKey = normRecallKey(newPath);
+    const db = readRecallsDB();
+    let changed = false;
+    Object.keys(db).forEach(k => {
+        if (k === oldKey || k.startsWith(oldKey + '/')) {
+            db[newKey + k.slice(oldKey.length)] = db[k];
+            delete db[k];
+            changed = true;
+        }
+    });
+    if (changed) writeRecallsDB(db);
+}
+
+// Xóa file/thư mục: dọn luôn dữ liệu thu hồi tương ứng
+function removeRecalls(targetPath) {
+    const key = normRecallKey(targetPath);
+    const db = readRecallsDB();
+    let changed = false;
+    Object.keys(db).forEach(k => {
+        if (k === key || k.startsWith(key + '/')) { delete db[k]; changed = true; }
+    });
+    if (changed) writeRecallsDB(db);
+}
+
+// Chỉ người có quyền TẢI FILE LÊN (UPLOAD / Read & Write) trên phân vùng của file mới được thu hồi / hủy thu hồi.
+// Quy tắc này phải khớp checkActionPermission('UPLOAD', zone) trong assets/js/permission.js:
+//   ADMIN, MASTER: mọi phân vùng | DESIGNER: 01_WIP | CONTRACTOR: 03_PUBLISHED | MANAGEMENT, INTERNAL: không có.
+// Server tự xác thực JWT và tra role/permission trong users.json, không tin dữ liệu từ trình duyệt.
+const UPLOAD_ZONES_BY_ROLE = {
+    ADMIN: ['WIP', 'SHARED', 'PUBLISHED', 'ARCHIVE'],
+    MASTER: ['WIP', 'SHARED', 'PUBLISHED', 'ARCHIVE'],
+    DESIGNER: ['WIP'],
+    CONTRACTOR: ['PUBLISHED']
+};
+
+function getZoneFromPath(p) {
+    const upper = String(p || '').toUpperCase();
+    if (upper.includes('02_SHARED')) return 'SHARED';
+    if (upper.includes('03_PUBLISHED')) return 'PUBLISHED';
+    if (upper.includes('04_ARCHIVE')) return 'ARCHIVE';
+    return 'WIP';
+}
+
+function canUserUploadInZone(user, zone) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    // Giống permission.js: ADMIN/MASTER ưu tiên, còn lại tra theo permission rồi tới role
+    if (permission === 'ADMIN' || role === 'ADMIN' || permission === 'MASTER' || role === 'MASTER') return true;
+    const zones = UPLOAD_ZONES_BY_ROLE[permission] || UPLOAD_ZONES_BY_ROLE[role] || [];
+    return zones.includes(zone);
+}
+
+function requireUploadPermission(req, res, next) {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        if (!token) return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
+
+        let payload;
+        try { payload = jwt.verify(token, JWT_SECRET); }
+        catch (e) { return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn, vui lòng đăng nhập lại!' }); }
+
+        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+        const user = users.find(u => u.username === payload.username);
+        if (!user) return res.status(401).json({ success: false, error: 'Tài khoản không tồn tại!' });
+
+        if (!canUserUploadInZone(user, getZoneFromPath(req.body && req.body.filePath))) {
+            return res.status(403).json({ success: false, error: 'Chỉ người có quyền tải file lên (Read & Write) mới được thu hồi tệp tin này!' });
+        }
+        req.authUser = user;
+        next();
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+}
+
+app.get('/api/recalls', (req, res) => {
+    try { res.json(readRecallsDB()); } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post('/api/recalls/recall', requireUploadPermission, (req, res) => {
+    try {
+        const { filePath, reason } = req.body;
+        const by = req.authUser.fullName || req.authUser.username;
+        if (!filePath || !reason || !String(reason).trim()) {
+            return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file hoặc lý do thu hồi!' });
+        }
+        const key = normRecallKey(filePath);
+        const fullPath = path.join(ROOT_DIR, key.replace(/^database\/bim-vdc\/?/, ''));
+        if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, error: 'Tệp không tồn tại!' });
+
+        const db = readRecallsDB();
+        if (db[key]) return res.status(409).json({ success: false, error: 'Tệp này đã được thu hồi trước đó!' });
+
+        db[key] = { by, at: new Date().toISOString(), reason: String(reason).trim() };
+        if (writeRecallsDB(db)) res.json({ success: true, message: 'Đã thu hồi tệp!', recall: db[key] });
+        else res.status(500).json({ success: false, error: 'Không thể ghi file' });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
+    try {
+        const { filePath } = req.body;
+        if (!filePath) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file!' });
+        const key = normRecallKey(filePath);
+        const db = readRecallsDB();
+        if (!db[key]) return res.status(404).json({ success: false, error: 'Tệp này chưa bị thu hồi!' });
+        delete db[key];
+        if (writeRecallsDB(db)) res.json({ success: true, message: 'Đã hủy thu hồi tệp!' });
+        else res.status(500).json({ success: false, error: 'Không thể ghi file' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
@@ -269,6 +446,9 @@ app.post('/api/rename', (req, res) => {
         const oldFullPath = path.join(ROOT_DIR, itemPath.replace(/^database\/bim-vdc\/?/, ''));
         if (fs.existsSync(oldFullPath)) {
             fs.renameSync(oldFullPath, path.join(path.dirname(oldFullPath), newName));
+            const renamedKey = path.posix.join(path.posix.dirname(normRecallKey(itemPath)), newName);
+            rekeyRecalls(itemPath, renamedKey);
+            rekeyIssues(itemPath, renamedKey);
             res.json({ success: true, message: 'Đổi tên thành công!' });
         } else {
             res.status(404).json({ success: false, error: 'Đường dẫn không tồn tại!' });
@@ -281,6 +461,8 @@ app.post('/api/delete', (req, res) => {
         const fullPath = path.join(ROOT_DIR, req.body.path.replace(/^database\/bim-vdc\/?/, ''));
         if (fs.existsSync(fullPath)) {
             fs.rmSync(fullPath, { recursive: true, force: true });
+            removeRecalls(req.body.path);
+            removeIssues(req.body.path);
             res.json({ success: true, message: 'Xóa thành công!' });
         } else {
             res.status(404).json({ success: false, error: 'Không tồn tại!' });
@@ -294,8 +476,14 @@ app.post('/api/move', (req, res) => {
         const srcFullPath = path.join(ROOT_DIR, sourcePath.replace(/^database\/bim-vdc\/?/, ''));
         const destParent = path.join(ROOT_DIR, targetDir.replace(/^database\/bim-vdc\/?/, ''));
         if (!fs.existsSync(srcFullPath)) return res.status(404).json({ success: false, error: 'Nguồn không tồn tại!' });
+        if (readRecallsDB()[normRecallKey(sourcePath)]) {
+            return res.status(423).json({ success: false, error: 'Tệp đã bị thu hồi, không thể di chuyển/chuyển Gate! Hãy hủy thu hồi trước.' });
+        }
         if (!fs.existsSync(destParent)) fs.mkdirSync(destParent, { recursive: true });
         fs.renameSync(srcFullPath, path.join(destParent, path.basename(srcFullPath)));
+        const movedKey = path.posix.join(normRecallKey(targetDir), path.basename(srcFullPath));
+        rekeyRecalls(sourcePath, movedKey);
+        rekeyIssues(sourcePath, movedKey);
         res.json({ success: true, message: 'Di chuyển thành công!' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
@@ -449,6 +637,15 @@ app.post('/api/chat/send', (req, res) => {
 // 9. STATIC SERVE & KHỞI ĐỘNG SERVER
 // ===============================================================
 app.use('/files', express.static(ROOT_DIR));
+
+// Thư viện cho trang Xem 3D (viewer-ifc.html), cài bằng: npm i three@0.160.0 web-ifc@0.0.57
+app.use('/vendor/three', express.static(path.join(__dirname, 'node_modules', 'three')));
+app.use('/vendor/web-ifc', express.static(path.join(__dirname, 'node_modules', 'web-ifc')));
+['three', 'web-ifc'].forEach(m => {
+    if (!fs.existsSync(path.join(__dirname, 'node_modules', m))) {
+        console.warn(`⚠️ Thiếu thư viện "${m}" cho Xem 3D. Chạy: npm i three@0.160.0 web-ifc@0.0.57`);
+    }
+});
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 app.listen(PORT, '0.0.0.0', () => {
