@@ -2,7 +2,7 @@
   {
     "id": 1,
     "username": "admin",
-    "passwordHash": "$2b$10$NjU0MzIx...HASHED...6",
+    "passwordHash": "$2b$10$oarCROxGKGcrZf7BOjm8nOwJwGfyrWFZJyZa9BtIX64Ro8DcC52JC",
     "role": "ADMIN",
     "permission": "ADMIN",
     "avatarLink": "",
