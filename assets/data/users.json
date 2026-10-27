@@ -2,7 +2,7 @@
   {
     "id": 1,
     "username": "admin",
-    "passwordHash": "$2b$10$NjU0MzIx...HASHED...6",
+    "passwordHash": "$2b$10$HRYr8EoqLcZtU4c9I3JVz.XTehsbVYtjybAgmexdVNhChxy5fFgBy",
     "role": "ADMIN",
     "permission": "ADMIN",
     "avatarLink": "",
@@ -12,7 +12,7 @@
     "discipline": "IT",
     "projects": "Tất cả dự án",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 2,
@@ -27,7 +27,7 @@
     "discipline": "Kỹ sư",
     "projects": "Project_01, Project_02",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 3,
@@ -42,7 +42,7 @@
     "discipline": "Kiến trúc sư",
     "projects": "Project_01",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 4,
@@ -57,7 +57,7 @@
     "discipline": "",
     "projects": "Project_02",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 5,
@@ -72,7 +72,7 @@
     "discipline": "Kỹ sư",
     "projects": "THAY LE NONG",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 6,
@@ -87,7 +87,7 @@
     "discipline": "Cử nhân kinh tế",
     "projects": "PROJECT 01",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 7,
@@ -102,7 +102,7 @@
     "discipline": "Cử nhân kinh tế",
     "projects": "PROJECT 02",
     "company": "PV INCONS CO.LTD",
-    "status": "Đang triển khai"
+    "status": "Active"
   },
   {
     "id": 8,
