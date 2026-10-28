@@ -394,6 +394,106 @@ function requireUploadPermission(req, res, next) {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 }
 
+// ===============================================================
+// 6c. API LƯU ĐÁNH GIÁ / Ý KIẾN PHỐI HỢP TỪ VIEWER 3D
+// Chỉ người có quyền "Read & Write" hoặc "Full Control" trên phân vùng ISO 19650 của file mới được lưu.
+// Ma trận quyền khớp với mir.html (roleMatrix). ADMIN luôn được phép.
+// Kết quả lưu cạnh file mô hình: <tên-file>.review.json (gộp theo cid để không ghi đè ý kiến người khác).
+// ===============================================================
+const REVIEW_ZONE_ACCESS = {
+    ADMIN:      { '01_WIP': 'FULL CONTROL', '02_SHARED': 'FULL CONTROL', '03_PUBLISHED': 'FULL CONTROL', '04_ARCHIVE': 'FULL CONTROL' },
+    MASTER:     { '01_WIP': 'FULL CONTROL', '02_SHARED': 'FULL CONTROL', '03_PUBLISHED': 'FULL CONTROL', '04_ARCHIVE': 'FULL CONTROL' },
+    MANAGEMENT: { '01_WIP': 'NO ACCESS',    '02_SHARED': 'FULL CONTROL', '03_PUBLISHED': 'FULL CONTROL', '04_ARCHIVE': 'READ & WRITE' },
+    DESIGNER:   { '01_WIP': 'FULL CONTROL', '02_SHARED': 'READ & WRITE', '03_PUBLISHED': 'READ-ONLY',    '04_ARCHIVE': 'NO ACCESS' },
+    CONTRACTOR: { '01_WIP': 'NO ACCESS',    '02_SHARED': 'READ-ONLY',    '03_PUBLISHED': 'READ & WRITE', '04_ARCHIVE': 'NO ACCESS' },
+    INTERNAL:   { '01_WIP': 'NO ACCESS',    '02_SHARED': 'READ-ONLY',    '03_PUBLISHED': 'READ-ONLY',    '04_ARCHIVE': 'NO ACCESS' }
+};
+
+function getContainerFromPath(p) {
+    const upper = String(p || '').toUpperCase();
+    return ['01_WIP', '02_SHARED', '03_PUBLISHED', '04_ARCHIVE'].find(c => upper.includes(c)) || null;
+}
+
+function canUserWriteReview(user, container) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    if (permission === 'ADMIN' || role === 'ADMIN') return true;
+    if (!container) return false;
+    const level = (REVIEW_ZONE_ACCESS[permission] || REVIEW_ZONE_ACCESS[role] || {})[container];
+    return level === 'FULL CONTROL' || level === 'READ & WRITE';
+}
+
+app.post('/api/review/save', (req, res) => {
+    try {
+        // 1. Xác thực JWT, tra quyền trong users.json (không tin dữ liệu từ trình duyệt)
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        if (!token) return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
+        let payload;
+        try { payload = jwt.verify(token, JWT_SECRET); }
+        catch (e) { return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn, vui lòng đăng nhập lại!' }); }
+
+        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+        const user = users.find(u => u.username === payload.username);
+        if (!user || user.status === 'Inactive') return res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' });
+
+        // 2. Kiểm tra đường dẫn file (chống path traversal) và quyền theo phân vùng
+        const { filePath, comments } = req.body || {};
+        if (!filePath || !Array.isArray(comments)) return res.status(400).json({ success: false, error: 'Thiếu thông tin file hoặc ý kiến!' });
+
+        const rel = String(filePath).replace(/\\/g, '/').replace(/^database\/bim-vdc\/?/, '');
+        const modelFull = path.resolve(ROOT_DIR, rel);
+        if (modelFull !== ROOT_DIR && !modelFull.startsWith(ROOT_DIR + path.sep)) {
+            return res.status(400).json({ success: false, error: 'Đường dẫn không hợp lệ!' });
+        }
+        if (!fs.existsSync(modelFull) || !fs.statSync(modelFull).isFile()) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy file mô hình trên server!' });
+        }
+
+        const container = getContainerFromPath(rel);
+        if (!canUserWriteReview(user, container)) {
+            return res.status(403).json({ success: false, error: 'Bạn cần quyền Read & Write hoặc Full Control trên thư mục này để lưu đánh giá!' });
+        }
+
+        // 3. Gộp với bản đã lưu (theo cid) rồi ghi file
+        const reviewFull = modelFull.replace(/\.[^./\\]+$/, '') + '.review.json';
+        let saved = [];
+        if (fs.existsSync(reviewFull)) {
+            try {
+                const old = JSON.parse(fs.readFileSync(reviewFull, 'utf8'));
+                saved = Array.isArray(old) ? old : (old.comments || []);
+            } catch (e) { saved = []; }
+        }
+        const byCid = new Map();
+        saved.forEach(c => { if (c && c.cid) byCid.set(c.cid, c); });
+        comments.forEach(c => {
+            if (!c || !c.cid || !c.globalId || typeof c.text !== 'string') return;
+            if (byCid.has(c.cid)) return; // ý kiến đã lưu: giữ nguyên, không cho sửa tác giả/nội dung
+            byCid.set(c.cid, {
+                cid: String(c.cid).slice(0, 80),
+                globalId: String(c.globalId).slice(0, 80),
+                name: String(c.name || '').slice(0, 300),
+                text: c.text.slice(0, 5000),
+                // Ý kiến mới luôn gắn với tài khoản đang đăng nhập (không tin tên do trình duyệt gửi lên)
+                author: user.fullName || user.username,
+                username: user.username,
+                role: String(user.role || ''),
+                at: c.at || new Date().toISOString(),
+                time: c.time || ''
+            });
+        });
+        const merged = [...byCid.values()].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+        fs.writeFileSync(reviewFull, JSON.stringify({
+            model: path.basename(modelFull),
+            savedBy: user.fullName || user.username,
+            savedAt: new Date().toISOString(),
+            comments: merged
+        }, null, 2), 'utf8');
+
+        res.json({ success: true, message: 'Đã lưu đánh giá: ' + path.basename(reviewFull), comments: merged });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
 app.get('/api/recalls', (req, res) => {
     try { res.json(readRecallsDB()); } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
