@@ -124,6 +124,59 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // ===============================================================
+// 4.1 API ĐỔI MẬT KHẨU NGƯỜI DÙNG HIỆN TẠI
+// ===============================================================
+app.post('/api/change-password', (req, res) => {
+    try {
+        // 1. Xác thực token từ header để biết chính xác ai đang đăng nhập
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
+        }
+
+        let payload;
+        try {
+            payload = jwt.verify(token, JWT_SECRET);
+        } catch (e) {
+            return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ!' });
+        }
+
+        const { newPassword } = req.body;
+        if (!newPassword || !String(newPassword).trim()) {
+            return res.status(400).json({ success: false, error: 'Vui lòng nhập mật khẩu mới!' });
+        }
+
+        // 2. Đọc file users.json
+        const data = fs.readFileSync(USER_FILE_PATH, 'utf8');
+        const users = JSON.parse(data || '[]');
+
+        // 3. Tìm đúng user đang đăng nhập dựa vào username trong token
+        const userIndex = users.findIndex(u => u.username === payload.username);
+        if (userIndex === -1) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản người dùng trong hệ thống!' });
+        }
+
+        // 4. Hash mật khẩu mới bằng bcrypt
+        const saltRounds = 10;
+        const hashedNewPassword = bcrypt.hashSync(newPassword, saltRounds);
+
+        // 5. Cập nhật passwordHash, giữ nguyên 100% các trường và dữ liệu khác
+        users[userIndex] = {
+            ...users[userIndex],
+            passwordHash: hashedNewPassword
+        };
+
+        // 6. Ghi lại vào file users.json
+        fs.writeFileSync(USER_FILE_PATH, JSON.stringify(users, null, 2), 'utf8');
+
+        res.json({ success: true, message: 'Đổi mật khẩu thành công!' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ===============================================================
 // 5. API UPLOAD AVATAR NGƯỜI DÙNG
 // ===============================================================
 app.post('/api/upload-avatar', (req, res) => {
@@ -522,14 +575,14 @@ let chatMessages = [];
 try {
     const parsed = JSON.parse(fs.readFileSync(chatFilePath, 'utf8'));
     if (Array.isArray(parsed)) chatMessages = parsed.slice(-CHAT_MAX_MESSAGES);
-} catch (e) {}
+} catch (e) { }
 
 function saveChatMessages() {
     try {
         const tmp = chatFilePath + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(chatMessages));
         fs.renameSync(tmp, chatFilePath);
-    } catch (e) {}
+    } catch (e) { }
 }
 
 function findChatUser(username) {
@@ -558,7 +611,7 @@ function chatSend(res, event, data) {
 function chatBroadcast(event, data, room) {
     for (const c of chatClients) {
         if (room && c.room !== room) continue;
-        try { chatSend(c.res, event, data); } catch (e) {}
+        try { chatSend(c.res, event, data); } catch (e) { }
     }
 }
 
@@ -593,7 +646,7 @@ app.get('/api/chat/stream', (req, res) => {
     chatBroadcast('presence', chatOnlineList(room), room);
 
     const keepAliveTimer = setInterval(() => {
-        try { res.write(': keepalive\n\n'); } catch (e) {}
+        try { res.write(': keepalive\n\n'); } catch (e) { }
     }, 25000);
 
     req.on('close', () => {
