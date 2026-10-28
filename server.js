@@ -47,19 +47,24 @@ if (!fs.existsSync(ROOT_DIR)) {
     fs.mkdirSync(ROOT_DIR, { recursive: true });
 }
 
-// Khởi tạo tài khoản master mặc định nếu chưa có
+// Khởi tạo tài khoản Administrator mặc định nếu chưa có
 if (!fs.existsSync(USER_FILE_PATH)) {
     const defaultPasswordHash = bcrypt.hashSync("123456", 10);
     const defaultUsers = [
         {
-            username: "master",
-            passwordHash: defaultPasswordHash,
-            role: "MASTER",
-            fullName: "TRẦN HOÀNG PHƯỚC",
-            position: "Giám đốc",
-            company: "PV INCONS CO.LTD",
-            status: "Đang triển khai",
-            groups: ["site"]
+            "id": 1,
+            "username": "admin",
+            "passwordHash": defaultPasswordHash,
+            "role": "ADMIN",
+            "permission": "ADMIN",
+            "avatarLink": "",
+            "fullName": "Administrator",
+            "phone": "0939751194",
+            "position": "Quản trị hệ thống",
+            "discipline": "Kỹ sư IT",
+            "projects": "Tất cả dự án",
+            "company": "PV INCONS CO.LTD",
+            "status": "Active"
         }
     ];
     fs.writeFileSync(USER_FILE_PATH, JSON.stringify(defaultUsers, null, 2), 'utf8');
