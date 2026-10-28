@@ -11,10 +11,14 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 
 // ===============================================================
-// 1. CẤU HÌNH & MIDDLEWARE CHUNG
+// 1. CẤU HÌNH & MIDDLEWARE CHUNG (Bật CORS cho phép Web Viewer ngoài đọc file)
 // ===============================================================
 app.set('trust proxy', true);
-app.use(cors());
+app.use(cors({
+    origin: '*', // Cho phép mọi domain (bao gồm thatopen.github.io) gọi dữ liệu file IFC
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json({ limit: '10mb' }));
 
 const JWT_SECRET = process.env.JWT_SECRET || 'PV_INCONS_SECRET_KEY_2026';
@@ -133,7 +137,6 @@ app.post('/api/auth/login', (req, res) => {
 // ===============================================================
 app.post('/api/change-password', (req, res) => {
     try {
-        // 1. Xác thực token từ header để biết chính xác ai đang đăng nhập
         const authHeader = req.headers.authorization || '';
         const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
         if (!token) {
@@ -152,27 +155,22 @@ app.post('/api/change-password', (req, res) => {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập mật khẩu mới!' });
         }
 
-        // 2. Đọc file users.json
         const data = fs.readFileSync(USER_FILE_PATH, 'utf8');
         const users = JSON.parse(data || '[]');
 
-        // 3. Tìm đúng user đang đăng nhập dựa vào username trong token
         const userIndex = users.findIndex(u => u.username === payload.username);
         if (userIndex === -1) {
             return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản người dùng trong hệ thống!' });
         }
 
-        // 4. Hash mật khẩu mới bằng bcrypt
         const saltRounds = 10;
         const hashedNewPassword = bcrypt.hashSync(newPassword, saltRounds);
 
-        // 5. Cập nhật passwordHash, giữ nguyên 100% các trường và dữ liệu khác
         users[userIndex] = {
             ...users[userIndex],
             passwordHash: hashedNewPassword
         };
 
-        // 6. Ghi lại vào file users.json
         fs.writeFileSync(USER_FILE_PATH, JSON.stringify(users, null, 2), 'utf8');
 
         res.json({ success: true, message: 'Đổi mật khẩu thành công!' });
@@ -225,8 +223,6 @@ function writeIssuesDB(dbData) {
     }
 }
 
-// Issue được lưu theo ĐƯỜNG DẪN file. Khi file đổi tên / chuyển Gate (di chuyển container),
-// phải chuyển khóa issue sang đường dẫn mới, nếu không issue cũ bị "mồ côi" và mất khỏi file.
 function rekeyIssues(oldPath, newPath) {
     const oldKey = normRecallKey(oldPath);
     const newKey = normRecallKey(newPath);
@@ -236,7 +232,7 @@ function rekeyIssues(oldPath, newPath) {
         const nk = normRecallKey(k);
         if (nk === oldKey || nk.startsWith(oldKey + '/')) {
             const target = newKey + nk.slice(oldKey.length);
-            db[target] = (db[target] || []).concat(db[k]); // nối tiếp nếu đích đã có issue
+            db[target] = (db[target] || []).concat(db[k]);
             if (target !== k) delete db[k];
             changed = true;
         }
@@ -244,7 +240,6 @@ function rekeyIssues(oldPath, newPath) {
     if (changed) writeIssuesDB(db);
 }
 
-// Xóa file/thư mục: dọn luôn issue tương ứng
 function removeIssues(targetPath) {
     const key = normRecallKey(targetPath);
     const db = readIssuesDB();
@@ -289,7 +284,6 @@ app.post('/api/issues/delete', (req, res) => {
 // ===============================================================
 // 6b. API THU HỒI FILE (RECALL API)
 // ===============================================================
-// Cấu trúc recalls.json: { "database/bim-vdc/...": { by, at, reason } }
 function readRecallsDB() {
     try {
         if (fs.existsSync(RECALLS_FILE_PATH)) {
@@ -311,13 +305,11 @@ function writeRecallsDB(dbData) {
     }
 }
 
-// Chuẩn hóa mọi đường dẫn về dạng "database/bim-vdc/..."
 function normRecallKey(p) {
     const rel = String(p || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/^database\/bim-vdc\/?/, '').replace(/\/+$/, '');
     return rel ? 'database/bim-vdc/' + rel : 'database/bim-vdc';
 }
 
-// Đổi tên/di chuyển: chuyển khóa thu hồi sang đường dẫn mới (gồm cả file con nếu là thư mục)
 function rekeyRecalls(oldPath, newPath) {
     const oldKey = normRecallKey(oldPath);
     const newKey = normRecallKey(newPath);
@@ -333,7 +325,6 @@ function rekeyRecalls(oldPath, newPath) {
     if (changed) writeRecallsDB(db);
 }
 
-// Xóa file/thư mục: dọn luôn dữ liệu thu hồi tương ứng
 function removeRecalls(targetPath) {
     const key = normRecallKey(targetPath);
     const db = readRecallsDB();
@@ -344,10 +335,6 @@ function removeRecalls(targetPath) {
     if (changed) writeRecallsDB(db);
 }
 
-// Chỉ người có quyền TẢI FILE LÊN (UPLOAD / Read & Write) trên phân vùng của file mới được thu hồi / hủy thu hồi.
-// Quy tắc này phải khớp checkActionPermission('UPLOAD', zone) trong assets/js/permission.js:
-//   ADMIN, MASTER: mọi phân vùng | DESIGNER: 01_WIP | CONTRACTOR: 03_PUBLISHED | MANAGEMENT, INTERNAL: không có.
-// Server tự xác thực JWT và tra role/permission trong users.json, không tin dữ liệu từ trình duyệt.
 const UPLOAD_ZONES_BY_ROLE = {
     ADMIN: ['WIP', 'SHARED', 'PUBLISHED', 'ARCHIVE'],
     MASTER: ['WIP', 'SHARED', 'PUBLISHED', 'ARCHIVE'],
@@ -366,7 +353,6 @@ function getZoneFromPath(p) {
 function canUserUploadInZone(user, zone) {
     const role = String(user.role || '').toUpperCase();
     const permission = String(user.permission || role).toUpperCase();
-    // Giống permission.js: ADMIN/MASTER ưu tiên, còn lại tra theo permission rồi tới role
     if (permission === 'ADMIN' || role === 'ADMIN' || permission === 'MASTER' || role === 'MASTER') return true;
     const zones = UPLOAD_ZONES_BY_ROLE[permission] || UPLOAD_ZONES_BY_ROLE[role] || [];
     return zones.includes(zone);
@@ -646,7 +632,6 @@ app.get('/api/chat/stream', (req, res) => {
     const client = { res, user, room };
     chatClients.add(client);
 
-    // Gửi danh sách online ngay khi kết nối thành công
     chatSend(res, 'presence', chatOnlineList(room));
     chatBroadcast('presence', chatOnlineList(room), room);
 
@@ -696,7 +681,6 @@ app.post('/api/chat/send', (req, res) => {
 // ===============================================================
 app.use('/files', express.static(ROOT_DIR));
 
-// Thư viện cho trang Xem 3D (viewer-ifc.html), cài bằng: npm i three@0.160.0 web-ifc@0.0.57
 app.use('/vendor/three', express.static(path.join(__dirname, 'node_modules', 'three')));
 app.use('/vendor/web-ifc', express.static(path.join(__dirname, 'node_modules', 'web-ifc')));
 ['three', 'web-ifc'].forEach(m => {
