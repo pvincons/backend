@@ -255,10 +255,10 @@ app.post('/api/issues/add', (req, res) => {
         if (!filePath || !text) return res.status(400).json({ success: false, error: 'Thiếu thông tin!' });
         const db = readIssuesDB();
         if (!db[filePath]) db[filePath] = [];
-        db[filePath].push({ 
-            text: text.trim(), 
-            time: new Date().toLocaleString('vi-VN'), 
-            author: author || 'TRẦN HOÀNG PHƯỚC' 
+        db[filePath].push({
+            text: text.trim(),
+            time: new Date().toLocaleString('vi-VN'),
+            author: author || 'TRẦN HOÀNG PHƯỚC'
         });
         if (writeIssuesDB(db)) res.json({ success: true, message: 'Đã lưu Issue!', issues: db[filePath] });
         else res.status(500).json({ success: false, error: 'Không thể ghi file' });
@@ -416,68 +416,348 @@ app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
 });
 
 // ===============================================================
-// 8. API KÝ SỐ XÁC THỰC VIETTEL CA / CLOUD HSM (HỖ TRỢ OTP & SỐ ĐIỆN THOẠI)
+// 8. TÍCH HỢP DỊCH VỤ CHỮ KÝ SỐ TỪ XA VIETTEL MYSIGN API (CHUẨN CSC & LƯU PHIÊN TỰ ĐỘNG KÝ)
 // ===============================================================
+const VIETTEL_MYSIGN_BASE_URL = process.env.VIETTEL_MYSIGN_BASE_URL || 'https://remotesigning.viettel.vn/vtss/service/ras';
+const VIETTEL_MYSIGN_CLIENT_ID = process.env.VIETTEL_MYSIGN_CLIENT_ID || 'adss_client';
+const VIETTEL_MYSIGN_CLIENT_SECRET = process.env.VIETTEL_MYSIGN_CLIENT_SECRET || 'your_client_secret';
+const VIETTEL_MYSIGN_PROFILE_ID = process.env.VIETTEL_MYSIGN_PROFILE_ID || 'ADSS RAS Profile 001';
 
-// API GỬI MÃ OTP KÝ SỐ QUA VIETTEL MYSIGN (HỖ TRỢ SỐ ĐIỆN THOẠI TÙY CHỈNH)
-app.post('/api/viettel-request-otp', (req, res) => {
+// 8.1. API Login lấy access_token từ Viettel MySign
+app.post('/api/viettel/login', async (req, res) => {
     try {
-        const { serialNumber, phoneNumber } = req.body;
-        if (!phoneNumber) {
-            return res.status(400).json({ success: false, error: 'Vui lòng cung cấp số điện thoại nhận OTP!' });
+        const { userId } = req.body;
+        const user_id = userId || req.body.user_id;
+        if (!user_id) {
+            return res.status(400).json({ success: false, error: 'Thiếu thông tin user_id (mã tài khoản ký số)!' });
         }
-        // Thực tế ở đây sẽ gọi API Viettel CA Gateway gửi OTP tới số điện thoại `phoneNumber`
-        console.log(`[VIETTEL CA] Đã gửi mã OTP tới số điện thoại: ${phoneNumber} (Serial: ${serialNumber || 'N/A'})`);
-        res.json({ success: true, message: `Mã OTP đã được gửi thành công đến số điện thoại ${phoneNumber}!` });
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/v1/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({
+                client_id: VIETTEL_MYSIGN_CLIENT_ID,
+                client_secret: VIETTEL_MYSIGN_CLIENT_SECRET,
+                profile_id: VIETTEL_MYSIGN_PROFILE_ID,
+                user_id: user_id
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi đăng nhập Viettel MySign' });
+        }
+
+        res.json({ success: true, ...data });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// API XÁC THỰC OTP VÀ THỰC HIỆN KÝ SỐ
-app.post('/api/viettel-verify-and-sign', (req, res) => {
+// 8.2. API Lấy danh sách Chứng thư số (Credentials/List)
+app.post('/api/viettel/credentials/list', async (req, res) => {
     try {
-        const { filePath, otpCode, phoneNumber, serialNumber } = req.body;
-        if (!filePath || !otpCode || !phoneNumber) {
-            return res.status(400).json({ success: false, error: 'Thiếu thông tin tệp, mã OTP hoặc số điện thoại!' });
+        const authHeader = req.headers.authorization || '';
+        const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.access_token;
+        if (!accessToken) {
+            return res.status(401).json({ success: false, error: 'Thiếu access_token phiên Viettel MySign!' });
         }
 
-        const rel = String(filePath).replace(/\\/g, '/').replace(/^database\/bim-vdc\/?/, '');
-        const fullPath = path.join(ROOT_DIR, rel);
-        if (!fs.existsSync(fullPath)) {
-            return res.status(404).json({ success: false, error: 'Không tìm thấy tệp tin trên server!' });
-        }
-
-        const ext = path.extname(fullPath).toLowerCase();
-        const signerName = 'người ký số qua OTP Viettel'; // Thực tế sẽ lấy từ thông tin chứng thư số
-        const certSerial = serialNumber || 'N/A';
-        const signedAt = new Date().toLocaleString('vi-VN');
-
-        if (otpCode.length !== 6) {
-            return res.status(400).json({ success: false, error: 'Mã OTP không hợp lệ (phải gồm 6 chữ số)!' });
-        }
-
-        // Ghi nhận lịch sử ký số vào QA-QC / Issues
-        const issuesDb = readIssuesDB();
-        if (!issuesDb[filePath]) issuesDb[filePath] = [];
-        issuesDb[filePath].push({
-            text: `[KÝ SỐ OTP VIETTEL - ${ext.toUpperCase()}] Xác thực thành công qua OTP (SĐT: ${phoneNumber}) bởi ${signerName} (Serial: ${certSerial})`,
-            time: signedAt,
-            author: signerName
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/list`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify({})
         });
-        writeIssuesDB(issuesDb);
 
-        res.json({
-            success: true,
-            message: `Ký số thành công qua mã OTP cho tệp ${ext.toUpperCase()} (SĐT: ${phoneNumber})!`,
-            signatureInfo: {
-                signer: signerName,
-                phone: phoneNumber,
-                serialNumber: certSerial,
-                signedAt: signedAt,
-                method: 'Cloud HSM OTP Authentication'
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi lấy danh sách CTS' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.3. API Lấy thông tin chi tiết Chứng thư số (Credentials/Info)
+app.post('/api/viettel/credentials/info', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.access_token;
+        const { credentialID, certificates, certInfo, authInfo } = req.body;
+
+        if (!accessToken || !credentialID) {
+            return res.status(400).json({ success: false, error: 'Thiếu access_token hoặc credentialID!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/info`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify({
+                credentialID: credentialID,
+                certificates: certificates || 'chain',
+                certInfo: certInfo !== undefined ? certInfo : true,
+                authInfo: authInfo !== undefined ? authInfo : true
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi lấy thông tin CTS' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.4. API Gửi yêu cầu ủy quyền ký tới Mobile/App (Credentials/Authorize)
+app.post('/api/viettel/credentials/authorize', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.access_token;
+        const { credentialID, numSignatures, documents, hash, description } = req.body;
+
+        if (!accessToken || !credentialID || !hash) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số bắt buộc (accessToken, credentialID, hash)!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/authorize`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify({
+                credentialID: credentialID,
+                numSignatures: numSignatures || 1,
+                documents: documents || [],
+                hash: Array.isArray(hash) ? hash : [hash],
+                description: description || 'Yêu cầu ký số văn bản CDE PV Incons'
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi ủy quyền ký trên MySign' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.5. API Gửi yêu cầu sinh chữ ký mã băm (SignHash)
+app.post('/api/viettel/signatures/signHash', async (req, res) => {
+    try {
+        const { credentialID, SAD, documents, hash, hashAlgo, signAlgo } = req.body;
+        if (!credentialID || !SAD || !hash) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số bắt buộc (credentialID, SAD, hash)!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/signatures/signHash`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${SAD}`
+            },
+            body: JSON.stringify({
+                credentialID: credentialID,
+                SAD: SAD,
+                documents: documents || [],
+                hash: Array.isArray(hash) ? hash : [hash],
+                hashAlgo: hashAlgo || '2.16.840.1.101.3.4.2.1', // SHA256
+                signAlgo: signAlgo || '1.2.840.113549.1.1.1', // RSA
+                async: 0
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi sinh chữ ký SignHash' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.6. API Lấy cấu hình thời gian lưu phiên tối đa (Credentials/extendConfig)
+app.get('/api/viettel/credentials/extendConfig', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.query.sad;
+        if (!SAD) {
+            return res.status(400).json({ success: false, error: 'Thiếu mã SAD ủy quyền!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/extendConfig`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${SAD}`
             }
         });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi lấy cấu hình extendConfig' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.7. API Đăng ký sử dụng chức năng lưu phiên / tự động ký (Register/Extension)
+app.post('/api/viettel/credentials/registerExtension', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
+        const { credential_id, duration } = req.body;
+
+        if (!SAD || !credential_id || !duration) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số (SAD, credential_id, duration)!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/registerExtension`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${SAD}`
+            },
+            body: JSON.stringify({
+                credential_id: credential_id,
+                duration: Number(duration),
+                SAD: SAD
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi đăng ký lưu phiên Register/Extension' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.8. API Gửi yêu cầu sinh chữ ký lưu phiên tự động (Credentials/extendTransaction)
+app.post('/api/viettel/credentials/extendTransaction', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
+        const { credentialID, documents, hash, hashAlgo, signAlgo, description } = req.body;
+
+        if (!SAD || !credentialID || !hash) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số (SAD, credentialID, hash)!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/extendTransaction`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${SAD}`
+            },
+            body: JSON.stringify({
+                credentialID: credentialID,
+                SAD: SAD,
+                documents: documents || [],
+                hash: Array.isArray(hash) ? hash : [hash],
+                hashAlgo: hashAlgo || '2.16.840.1.101.3.4.2.1',
+                signAlgo: signAlgo || '1.2.840.113549.1.1.1',
+                description: description || 'Tự động ký lưu phiên PV Incons CDE'
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi extendTransaction' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.9. API Kiểm tra trạng thái lưu phiên ký (Timecheck)
+app.post('/api/viettel/credentials/transaction/check', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
+        if (!SAD) {
+            return res.status(400).json({ success: false, error: 'Thiếu mã SAD phiên ký!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/transaction/check`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${SAD}`
+            },
+            body: JSON.stringify({ SAD: SAD })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi kiểm tra trạng thái Timecheck' });
+        }
+
+        res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 8.10. API Hủy đăng ký chức năng lưu phiên (Deletion/Extension)
+app.delete('/api/viettel/credentials/deleteExtension', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
+        const { credential_id } = req.body;
+
+        if (!SAD || !credential_id) {
+            return res.status(400).json({ success: false, error: 'Thiếu SAD hoặc credential_id!' });
+        }
+
+        const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/deleteExtension`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${SAD}`
+            },
+            body: JSON.stringify({ credential_id: credential_id })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi hủy gia hạn Delete/Extension' });
+        }
+
+        res.json({ success: true, ...data });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
