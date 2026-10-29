@@ -31,7 +31,9 @@ app.use((req, res, next) => {
 // ===============================================================
 const USER_FILE_PATH = path.join(__dirname, 'assets', 'data', 'users.json');
 const AVATAR_DIR = path.join(__dirname, 'assets', 'data', 'avatar');
-const BASE_DATABASE_DIR = path.join(__dirname, 'database');
+
+// Linh hoạt đường dẫn: Nếu có biến môi trường DATABASE_PATH thì dùng (cho Production/VPS), ngược lại dùng thư mục database nội bộ (cho Local)
+const BASE_DATABASE_DIR = process.env.DATABASE_PATH || path.join(__dirname, 'database');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
 const RECALLS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'recalls.json');
@@ -406,7 +408,6 @@ const REVIEW_ZONE_ACCESS = {
     MANAGEMENT: { '01_WIP': 'NO ACCESS',    '02_SHARED': 'FULL CONTROL', '03_PUBLISHED': 'FULL CONTROL', '04_ARCHIVE': 'READ & WRITE' },
     DESIGNER:   { '01_WIP': 'FULL CONTROL', '02_SHARED': 'READ & WRITE', '03_PUBLISHED': 'READ-ONLY',    '04_ARCHIVE': 'NO ACCESS' },
     CONTRACTOR: { '01_WIP': 'NO ACCESS',    '02_SHARED': 'READ-ONLY',    '03_PUBLISHED': 'READ & WRITE', '04_ARCHIVE': 'NO ACCESS' },
-    INTERNAL:   { '01_WIP': 'NO ACCESS',    '02_SHARED': 'READ-ONLY',    '03_PUBLISHED': 'READ-ONLY',    '04_ARCHIVE': 'NO ACCESS' }
 };
 
 function getContainerFromPath(p) {
