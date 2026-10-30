@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
@@ -535,18 +536,109 @@ app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
 });
 
 // ===============================================================
-// 10. TÍCH HỢP DỊCH VỤ CHỮ KÝ SỐ TỪ XA VIETTEL MYSIGN API (CHUẨN CSC & LƯU PHIÊN TỰ ĐỘNG KÝ)
+// 10. TÍCH HỢP DỊCH VỤ CHỮ KÝ SỐ TỪ XA VIETTEL MYSIGN API (CSC & LƯU PHIÊN)
 // ===============================================================
 const VIETTEL_MYSIGN_BASE_URL = process.env.VIETTEL_MYSIGN_BASE_URL || 'https://remotesigning.viettel.vn/vtss/service/ras';
 const VIETTEL_MYSIGN_CLIENT_ID = process.env.VIETTEL_MYSIGN_CLIENT_ID || 'adss_client';
 const VIETTEL_MYSIGN_CLIENT_SECRET = process.env.VIETTEL_MYSIGN_CLIENT_SECRET || 'your_client_secret';
 const VIETTEL_MYSIGN_PROFILE_ID = process.env.VIETTEL_MYSIGN_PROFILE_ID || 'ADSS RAS Profile 001';
 
-// 10.1. API Login lấy access_token từ Viettel MySign
-app.post('/api/viettel/login', async (req, res) => {
+// File lưu trữ chữ ký số tập trung
+const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
+
+if (!fs.existsSync(SIGNATURES_FILE_PATH)) {
+    fs.writeFileSync(SIGNATURES_FILE_PATH, JSON.stringify({}, null, 2), 'utf8');
+}
+
+// Hàm hỗ trợ đọc file từ kho CDE, tạo mã băm SHA-256 dạng Base64 phục vụ Viettel MySign API
+function hashCdeFile(filePath) {
+    try {
+        const cleanPath = String(filePath).replace(/^database\/bim-vdc\/?/, '');
+        const fullPath = path.join(ROOT_DIR, cleanPath);
+
+        // Kiểm tra chống Path Traversal bảo mật
+        if (!fullPath.startsWith(ROOT_DIR) || !fs.existsSync(fullPath)) {
+            return { error: 'Không tìm thấy tệp tin cần ký trên hệ thống CDE!', status: 404 };
+        }
+
+        const fileBuffer = fs.readFileSync(fullPath);
+        // Viettel MySign yêu cầu mã băm SHA-256 chuẩn Base64
+        const hashBuf = crypto.createHash('sha256').update(fileBuffer).digest();
+        const hashBase64 = hashBuf.toString('base64');
+        const fileName = path.basename(fullPath);
+
+        return { fileName, hashBase64 };
+    } catch (err) {
+        return { error: 'Lỗi xử lý băm tệp tin: ' + err.message, status: 500 };
+    }
+}
+
+function readSignaturesDB() {
+    try {
+        if (fs.existsSync(SIGNATURES_FILE_PATH)) {
+            return JSON.parse(fs.readFileSync(SIGNATURES_FILE_PATH, 'utf8') || '{}');
+        }
+    } catch (e) {
+        console.error('Lỗi đọc signatures.json:', e);
+    }
+    return {};
+}
+
+function saveSignatureRecord(filePath, sigData, user) {
+    try {
+        const db = readSignaturesDB();
+        const key = normRecallKey(filePath);
+        const record = {
+            filePath: key,
+            fileName: path.basename(filePath),
+            signatures: sigData.signatures || sigData,
+            fileHash: sigData.fileHash,
+            signedBy: user ? (user.fullName || user.username) : 'Administrator',
+            signedAt: new Date().toISOString()
+        };
+        db[key] = record;
+        // Chỉ lưu tập trung vào đúng một file signatures.json duy nhất
+        fs.writeFileSync(SIGNATURES_FILE_PATH, JSON.stringify(db, null, 2), 'utf8');
+    } catch (e) {
+        console.error('Lỗi lưu bản ghi chữ ký:', e);
+    }
+}
+
+// Middleware bảo mật yêu cầu đăng nhập CDE cho các route Viettel API
+function requireCdeAuth(req, res, next) {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
+        }
+        const payload = jwt.verify(token, JWT_SECRET);
+        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+        const user = users.find(u => u.username === payload.username);
+        if (!user || user.status === 'Inactive') {
+            return res.status(401).json({ success: false, error: 'Tài khoản không hợp lệ hoặc đã bị khóa!' });
+        }
+        req.authUser = user;
+        next();
+    } catch (error) {
+        return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' });
+    }
+}
+
+// API Lấy danh sách chữ ký đã thực hiện
+app.get('/api/viettel/signatures', (req, res) => {
+    try {
+        res.json(readSignaturesDB());
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 10.1. API Login lấy access_token từ Viettel MySign (Yêu cầu xác thực CDE)
+app.post('/api/viettel/login', requireCdeAuth, async (req, res) => {
     try {
         const { userId } = req.body;
-        const user_id = userId || req.body.user_id;
+        const user_id = userId || req.body.user_id || (req.authUser ? req.authUser.phone : '');
         if (!user_id) {
             return res.status(400).json({ success: false, error: 'Thiếu thông tin user_id (mã tài khoản ký số)!' });
         }
@@ -573,8 +665,8 @@ app.post('/api/viettel/login', async (req, res) => {
     }
 });
 
-// 10.2. API Lấy danh sách Chứng thư số (Credentials/List)
-app.post('/api/viettel/credentials/list', async (req, res) => {
+// 10.2. API Lấy danh sách Chứng thư số
+app.post('/api/viettel/credentials/list', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.access_token;
@@ -603,8 +695,8 @@ app.post('/api/viettel/credentials/list', async (req, res) => {
     }
 });
 
-// 10.3. API Lấy thông tin chi tiết Chứng thư số (Credentials/Info)
-app.post('/api/viettel/credentials/info', async (req, res) => {
+// 10.3. API Lấy thông tin chi tiết Chứng thư số
+app.post('/api/viettel/credentials/info', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.access_token;
@@ -640,15 +732,20 @@ app.post('/api/viettel/credentials/info', async (req, res) => {
     }
 });
 
-// 10.4. API Gửi yêu cầu ủy quyền ký tới Mobile/App (Credentials/Authorize)
-app.post('/api/viettel/credentials/authorize', async (req, res) => {
+// 10.4. API Gửi yêu cầu ủy quyền ký tới Mobile/App (Authorize)
+app.post('/api/viettel/credentials/authorize', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.access_token;
-        const { credentialID, numSignatures, documents, hash, description } = req.body;
+        const { credentialID, numSignatures, filePath, description } = req.body;
 
-        if (!accessToken || !credentialID || !hash) {
-            return res.status(400).json({ success: false, error: 'Thiếu tham số bắt buộc (accessToken, credentialID, hash)!' });
+        if (!accessToken || !credentialID || !filePath) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số bắt buộc (accessToken, credentialID, filePath)!' });
+        }
+
+        const fileInfo = await hashCdeFile(filePath);
+        if (fileInfo.error) {
+            return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
         }
 
         const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/authorize`, {
@@ -661,9 +758,9 @@ app.post('/api/viettel/credentials/authorize', async (req, res) => {
             body: JSON.stringify({
                 credentialID: credentialID,
                 numSignatures: numSignatures || 1,
-                documents: documents || [],
-                hash: Array.isArray(hash) ? hash : [hash],
-                description: description || 'Yêu cầu ký số văn bản CDE PV Incons'
+                documents: [{ document_id: 1, document_name: fileInfo.fileName }],
+                hash: [fileInfo.hashBase64],
+                description: description || 'Xác thực sinh trắc học ký số tài liệu CDE PV Incons'
             })
         });
 
@@ -672,18 +769,23 @@ app.post('/api/viettel/credentials/authorize', async (req, res) => {
             return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi ủy quyền ký trên MySign' });
         }
 
-        res.json({ success: true, ...data });
+        res.json({ success: true, ...data, fileName: fileInfo.fileName, fileHash: fileInfo.hashBase64 });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 10.5. API Gửi yêu cầu sinh chữ ký mã băm (SignHash)
-app.post('/api/viettel/signatures/signHash', async (req, res) => {
+// 10.5. API Sinh chữ ký mã băm (SignHash) và lưu vào database/signer
+app.post('/api/viettel/signatures/signHash', requireCdeAuth, async (req, res) => {
     try {
-        const { credentialID, SAD, documents, hash, hashAlgo, signAlgo } = req.body;
-        if (!credentialID || !SAD || !hash) {
-            return res.status(400).json({ success: false, error: 'Thiếu tham số bắt buộc (credentialID, SAD, hash)!' });
+        const { credentialID, SAD, filePath, hashAlgo, signAlgo } = req.body;
+        if (!credentialID || !SAD || !filePath) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số bắt buộc (credentialID, SAD, filePath)!' });
+        }
+
+        const fileInfo = await hashCdeFile(filePath);
+        if (fileInfo.error) {
+            return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
         }
 
         const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/signatures/signHash`, {
@@ -696,8 +798,8 @@ app.post('/api/viettel/signatures/signHash', async (req, res) => {
             body: JSON.stringify({
                 credentialID: credentialID,
                 SAD: SAD,
-                documents: documents || [],
-                hash: Array.isArray(hash) ? hash : [hash],
+                documents: [{ document_id: 1, document_name: fileInfo.fileName }],
+                hash: [fileInfo.hashBase64],
                 hashAlgo: hashAlgo || '2.16.840.1.101.3.4.2.1', // SHA256
                 signAlgo: signAlgo || '1.2.840.113549.1.1.1', // RSA
                 async: 0
@@ -709,14 +811,17 @@ app.post('/api/viettel/signatures/signHash', async (req, res) => {
             return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi sinh chữ ký SignHash' });
         }
 
-        res.json({ success: true, ...data });
+        const resultRecord = { ...data, fileName: fileInfo.fileName, fileHash: fileInfo.hashBase64 };
+        saveSignatureRecord(filePath, resultRecord, req.authUser);
+
+        res.json({ success: true, ...resultRecord });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 10.6. API Lấy cấu hình thời gian lưu phiên tối đa (Credentials/extendConfig)
-app.get('/api/viettel/credentials/extendConfig', async (req, res) => {
+// 10.6. API Lấy cấu hình thời gian lưu phiên tối đa (extendConfig)
+app.get('/api/viettel/credentials/extendConfig', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.query.sad;
@@ -744,8 +849,8 @@ app.get('/api/viettel/credentials/extendConfig', async (req, res) => {
     }
 });
 
-// 10.7. API Đăng ký sử dụng chức năng lưu phiên / tự động ký (Register/Extension)
-app.post('/api/viettel/credentials/registerExtension', async (req, res) => {
+// 10.7. API Đăng ký lưu phiên tự động ký (registerExtension)
+app.post('/api/viettel/credentials/registerExtension', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
@@ -780,15 +885,28 @@ app.post('/api/viettel/credentials/registerExtension', async (req, res) => {
     }
 });
 
-// 10.8. API Gửi yêu cầu sinh chữ ký lưu phiên tự động (Credentials/extendTransaction)
-app.post('/api/viettel/credentials/extendTransaction', async (req, res) => {
+// 10.8. API Ký tự động lưu phiên (extendTransaction)
+app.post('/api/viettel/credentials/extendTransaction', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
-        const { credentialID, documents, hash, hashAlgo, signAlgo, description } = req.body;
+        const { credentialID, filePath, hash, hashAlgo, signAlgo, description } = req.body;
 
-        if (!SAD || !credentialID || !hash) {
-            return res.status(400).json({ success: false, error: 'Thiếu tham số (SAD, credentialID, hash)!' });
+        if (!SAD || !credentialID || (!filePath && !hash)) {
+            return res.status(400).json({ success: false, error: 'Thiếu tham số (SAD, credentialID, filePath)!' });
+        }
+
+        let hashList, documents = [];
+        if (filePath) {
+            const fileInfo = await hashCdeFile(filePath);
+            if (fileInfo.error) {
+                return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
+            }
+            hashList = [fileInfo.hashBase64];
+            documents = [{ document_id: 1, document_name: fileInfo.fileName }];
+        } else {
+            hashList = Array.isArray(hash) ? hash : [hash];
+            documents = req.body.documents || [];
         }
 
         const response = await fetch(`${VIETTEL_MYSIGN_BASE_URL}/csc/v1/credentials/extendTransaction`, {
@@ -801,8 +919,8 @@ app.post('/api/viettel/credentials/extendTransaction', async (req, res) => {
             body: JSON.stringify({
                 credentialID: credentialID,
                 SAD: SAD,
-                documents: documents || [],
-                hash: Array.isArray(hash) ? hash : [hash],
+                documents: documents,
+                hash: hashList,
                 hashAlgo: hashAlgo || '2.16.840.1.101.3.4.2.1',
                 signAlgo: signAlgo || '1.2.840.113549.1.1.1',
                 description: description || 'Tự động ký lưu phiên PV Incons CDE'
@@ -814,14 +932,19 @@ app.post('/api/viettel/credentials/extendTransaction', async (req, res) => {
             return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi extendTransaction' });
         }
 
-        res.json({ success: true, ...data });
+        const resultRecord = { ...data, fileName: documents[0] ? documents[0].document_name : 'file', fileHash: hashList[0] };
+        if (filePath) {
+            saveSignatureRecord(filePath, resultRecord, req.authUser);
+        }
+
+        res.json({ success: true, ...resultRecord });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // 10.9. API Kiểm tra trạng thái lưu phiên ký (Timecheck)
-app.post('/api/viettel/credentials/transaction/check', async (req, res) => {
+app.post('/api/viettel/credentials/transaction/check', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
@@ -850,8 +973,8 @@ app.post('/api/viettel/credentials/transaction/check', async (req, res) => {
     }
 });
 
-// 10.10. API Hủy đăng ký chức năng lưu phiên (Deletion/Extension)
-app.delete('/api/viettel/credentials/deleteExtension', async (req, res) => {
+// 10.10. API Hủy đăng ký lưu phiên (deleteExtension)
+app.delete('/api/viettel/credentials/deleteExtension', requireCdeAuth, async (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
         const SAD = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.body.SAD;
