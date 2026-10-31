@@ -9,33 +9,49 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
+// Các thư viện xử lý nhúng chữ ký số PDF
+const { signPdf } = require('node-signpdf');
+const { PDFDocument } = require('pdf-lib');
+
 const app = express();
 
 // ===============================================================
 // 1. CẤU HÌNH & MIDDLEWARE CHUNG
 // ===============================================================
 app.set('trust proxy', true);
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const JWT_SECRET = process.env.JWT_SECRET || (IS_PRODUCTION ? '' : 'PV_INCONS_SECRET_KEY_2026');
+const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
 
-// Production: bắt buộc có đủ biến môi trường (thiếu thì dừng, không dùng giá trị mặc định)
-if (IS_PRODUCTION) {
-    const missing = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET']
-        .filter(k => !process.env[k] || !String(process.env[k]).trim());
-    if (missing.length || JWT_SECRET === 'PV_INCONS_SECRET_KEY_2026') {
-        console.error('[PV INCONS SERVER] LỖI CẤU HÌNH: file .env chưa được nạp hoặc thiếu/không an toàn:',
-            missing.length ? missing.join(', ') : 'JWT_SECRET đang dùng giá trị mặc định');
-        process.exit(1);
-    }
+// Bắt buộc có đủ biến môi trường (thiếu thì dừng server, KHÔNG dùng giá trị mặc định)
+const REQUIRED_ENV = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET'];
+if (IS_PRODUCTION) REQUIRED_ENV.push('SMARTCA_WEBHOOK_TOKEN', 'PUBLIC_API_BASE_URL', 'CORS_ALLOWED_ORIGINS');
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k] || !String(process.env[k]).trim());
+if (missingEnv.length) {
+    console.error('[PV INCONS SERVER] LỖI CẤU HÌNH: file .env chưa được nạp hoặc thiếu biến:', missingEnv.join(', '));
+    process.exit(1);
 }
+if (JWT_SECRET.length < 32 || JWT_SECRET === 'PV_INCONS_SECRET_KEY_2026') {
+    console.error('[PV INCONS SERVER] LỖI CẤU HÌNH: JWT_SECRET quá ngắn (<32 ký tự) hoặc là giá trị mặc định cũ. Hãy tạo bằng: openssl rand -hex 48');
+    process.exit(1);
+}
+
+// CORS: chỉ cho phép các website khai báo trong CORS_ALLOWED_ORIGINS (phân tách bằng dấu phẩy)
+const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(o => o.trim().replace(/\/+$/, '')).filter(Boolean);
+app.use(cors({
+    origin(origin, cb) {
+        if (!origin) return cb(null, true); // server-to-server (VNPT callback), curl, health-check: không có Origin
+        if (CORS_ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+        if (!IS_PRODUCTION && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
+        return cb(null, false); // không trả header CORS -> trình duyệt chặn
+    }
+}));
+app.use(express.json({ limit: '10mb' }));
 
 // Middleware ghi log request thời gian thực
 app.use((req, res, next) => {
-    console.log(`[PV INCONS SERVER] [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
+    console.log(`[PV INCONS SERVER] [${new Date().toLocaleTimeString()}] ${req.method} ${req.url.replace(/([?&]token=)[^&]*/i, '$1***')}`);
     next();
 });
 
@@ -526,9 +542,9 @@ app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
 // ===============================================================
 // 10. TÍCH HỢP DỊCH VỤ CHỮ KÝ SỐ TỪ XA VNPT SMARTCA (CSC & OAUTH2 API v1.1)
 // ===============================================================
-const VNPT_SMARTCA_BASE_URL = process.env.VNPT_SMARTCA_BASE_URL || 'https://gwsca.vnpt.vn';
-const VNPT_SMARTCA_CLIENT_ID = process.env.VNPT_SMARTCA_CLIENT_ID || 'your_vnpt_client_id';
-const VNPT_SMARTCA_CLIENT_SECRET = process.env.VNPT_SMARTCA_CLIENT_SECRET || 'your_vnpt_client_secret';
+const VNPT_SMARTCA_BASE_URL = process.env.VNPT_SMARTCA_BASE_URL.replace(/\/+$/, '');
+const VNPT_SMARTCA_CLIENT_ID = process.env.VNPT_SMARTCA_CLIENT_ID;
+const VNPT_SMARTCA_CLIENT_SECRET = process.env.VNPT_SMARTCA_CLIENT_SECRET;
 
 const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
 
@@ -539,10 +555,12 @@ if (!fs.existsSync(SIGNATURES_FILE_PATH)) {
 // Hàm băm file CDE chuẩn SHA-256 dạng Base64
 function hashCdeFile(filePath) {
     try {
-        const cleanPath = String(filePath).replace(/^database\/bim-vdc\/?/, '');
-        const fullPath = path.join(ROOT_DIR, cleanPath);
+        const cleanPath = String(filePath || '').replace(/^database\/bim-vdc\/?/, '');
+        const fullPath = path.resolve(ROOT_DIR, cleanPath);
+        const rootResolved = path.resolve(ROOT_DIR);
 
-        if (!fullPath.startsWith(ROOT_DIR) || !fs.existsSync(fullPath)) {
+        // Phải nằm TRONG ROOT_DIR (so sánh kèm dấu phân cách để tránh trùng tiền tố thư mục)
+        if (!fullPath.startsWith(rootResolved + path.sep) || !fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
             return { error: 'Không tìm thấy tệp tin cần ký trên hệ thống CDE!', status: 404 };
         }
 
@@ -550,11 +568,35 @@ function hashCdeFile(filePath) {
         const hashBuf = crypto.createHash('sha256').update(fileBuffer).digest();
         const hashBase64 = hashBuf.toString('base64');
         const fileName = path.basename(fullPath);
+        const relPath = path.relative(rootResolved, fullPath).split(path.sep).join('/');
 
-        return { fileName, hashBase64 };
+        return { fileName, hashBase64, relPath };
     } catch (err) {
         return { error: 'Lỗi xử lý băm tệp tin: ' + err.message, status: 500 };
     }
+}
+
+// Quyền KÝ SỐ file: yêu cầu quyền ghi (FULL CONTROL / READ & WRITE) trên khu vực (01_WIP...04_ARCHIVE) chứa file,
+// tính theo đường dẫn ĐÃ CHUẨN HÓA trên đĩa (không tin chuỗi filePath do client gửi).
+function canUserSignFile(user, relPath) {
+    return canUserWriteReview(user, getContainerFromPath(relPath));
+}
+
+// Lưu giao dịch ký (tranId -> file, hash, người yêu cầu) để gettraninfo không phải tin filePath từ client
+const SIGN_TX_FILE_PATH = path.join(BASE_DATABASE_DIR, 'sign_transactions.json');
+const SIGN_TX_TTL_MS = 24 * 60 * 60 * 1000;
+function readSignTx() {
+    try { return fs.existsSync(SIGN_TX_FILE_PATH) ? JSON.parse(fs.readFileSync(SIGN_TX_FILE_PATH, 'utf8') || '{}') : {}; }
+    catch (e) { return {}; }
+}
+function saveSignTx(tranId, info) {
+    try {
+        const db = readSignTx();
+        const now = Date.now();
+        Object.keys(db).forEach(k => { if (now - (db[k].createdAt || 0) > SIGN_TX_TTL_MS) delete db[k]; });
+        db[tranId] = { ...info, createdAt: now };
+        fs.writeFileSync(SIGN_TX_FILE_PATH, JSON.stringify(db, null, 2), 'utf8');
+    } catch (e) { console.error('Lỗi lưu giao dịch ký:', e); }
 }
 
 function readSignaturesDB() {
@@ -681,10 +723,19 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
     try {
         const accessToken = req.body && req.body.access_token;
         if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
-        const { credentialId, filePath, description, notifyUrl } = req.body;
+        const { credentialId, filePath, description } = req.body;
 
         const fileInfo = hashCdeFile(filePath);
         if (fileInfo.error) return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
+
+        if (!canUserSignFile(req.authUser, fileInfo.relPath)) {
+            return res.status(403).json({ success: false, error: 'Bạn không có quyền ký số tài liệu trong khu vực này của CDE!' });
+        }
+
+        // notifyUrl do SERVER tạo (không nhận từ client), kèm token để xác thực callback từ VNPT
+        const notifyUrl = process.env.SMARTCA_WEBHOOK_TOKEN
+            ? `${String(process.env.PUBLIC_API_BASE_URL || '').replace(/\/+$/, '')}/api/smartca/callback?token=${encodeURIComponent(process.env.SMARTCA_WEBHOOK_TOKEN)}`
+            : '';
 
         const refTranId = 'PVI-' + Date.now();
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/signature/signhash`, {
@@ -693,7 +744,7 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             body: JSON.stringify({
                 credentialId: credentialId,
                 refTranId: refTranId,
-                ...(notifyUrl ? { notifyUrl } : {}),
+                ...(notifyUrl && process.env.PUBLIC_API_BASE_URL ? { notifyUrl } : {}),
                 description: description || 'Ký số tài liệu CDE PV Incons qua VNPT SmartCA',
                 datas: [
                     {
@@ -707,6 +758,15 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
         const data = await response.json();
         if (!response.ok) return res.status(response.status).json({ success: false, error: data.message || 'Lỗi yêu cầu ký SignHash VNPT' });
 
+        if (data.code !== 0 || !data.content || !data.content.tranId) {
+            return res.status(400).json({ success: false, error: data.message || data.codeDesc || 'VNPT SmartCA không tạo được giao dịch ký số' });
+        }
+        saveSignTx(data.content.tranId, {
+            filePath: fileInfo.relPath,
+            hashBase64: fileInfo.hashBase64,
+            username: req.authUser.username
+        });
+
         res.json({ success: true, ...data, filePath, fileName: fileInfo.fileName });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -718,7 +778,11 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
     try {
         const accessToken = req.body && req.body.access_token;
         if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
-        const { tranId, filePath } = req.body;
+        const { tranId } = req.body;
+        const txInfo = readSignTx()[tranId];
+        if (!txInfo || txInfo.username !== req.authUser.username) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy giao dịch ký số của bạn trên hệ thống CDE (hoặc đã quá 24 giờ).' });
+        }
 
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/gettraninfo`, {
             method: 'POST',
@@ -745,8 +809,34 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
 
         const tranStatus = data.content.tranStatus;
         // CHỈ ghi nhận chữ ký khi giao dịch thành công (tranStatus = 1). 4000 là đang chờ người ký xác nhận.
-        if (tranStatus === 1 && filePath) {
-            saveVnptSignatureRecord(filePath, data.content, req.authUser);
+        if (tranStatus === 1) {
+            // Đảm bảo file chưa bị thay đổi kể từ lúc yêu cầu ký (hash hiện tại phải trùng hash đã gửi VNPT)
+            const current = hashCdeFile(txInfo.filePath);
+            if (current.error || current.hashBase64 !== txInfo.hashBase64) {
+                return res.status(409).json({ success: false, error: 'Tệp tin đã bị thay đổi hoặc không còn tồn tại sau khi gửi yêu cầu ký, không thể ghi nhận chữ ký!' });
+            }
+
+            // Tiến hành nhúng chữ ký PKCS#7 từ VNPT SmartCA nếu có chuỗi chữ ký trả về
+            if (data.content.signatures && data.content.signatures.length > 0) {
+                const pkcs7Hex = data.content.signatures[0].signature || data.content.signatures[0];
+                if (pkcs7Hex && txInfo.filePath.toLowerCase().endsWith('.pdf')) {
+                    try {
+                        const cleanPath = String(txInfo.filePath).replace(/^database\/bim-vdc\/?/, '');
+                        const fullPath = path.resolve(ROOT_DIR, cleanPath);
+                        if (fs.existsSync(fullPath)) {
+                            const pdfBuffer = fs.readFileSync(fullPath);
+                            const signatureBuffer = Buffer.from(pkcs7Hex, 'hex');
+                            const signedPdfBuffer = signPdf(pdfBuffer, signatureBuffer);
+                            fs.writeFileSync(fullPath, signedPdfBuffer);
+                            console.log(`[PV INCONS] Đã nhúng chữ ký số PKCS#7 thành công vào file PDF: ${txInfo.filePath}`);
+                        }
+                    } catch (embedErr) {
+                        console.error('[PV INCONS] Lỗi nhúng chữ ký số PKCS#7 vào file PDF:', embedErr);
+                    }
+                }
+            }
+
+            saveVnptSignatureRecord(txInfo.filePath, data.content, req.authUser);
         }
 
         res.json({ success: true, ...data, tranStatus, tranStatusName: TRAN_STATUS[tranStatus] || 'UNKNOWN' });
@@ -755,24 +845,87 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
     }
 });
 
-// 10.6. API NHẬN CALLBACK TỪ VNPT SMARTCA
-app.all('/api/smartca/callback', (req, res) => {
+// ===============================================================
+// 10.5.1 API XỬ LÝ NHÚNG CHỮ KÝ SỐ PKCS#7 VÀO FILE PDF TRỰC TIẾP (DÒNG 622 - 683)
+// ===============================================================
+app.post('/api/vnpt/signature/embed', requireCdeAuth, async (req, res) => {
     try {
-        // Lấy các tham số trả về từ VNPT SmartCA (như code, state, tranId, v.v.)
-        const callbackData = req.method === 'GET' ? req.query : req.body;
-        console.log('[VNPT SMARTCA CALLBACK] Nhận dữ liệu phản hồi:', callbackData);
+        const { filePath, pkcs7Hex } = req.body;
+        // filePath: Đường dẫn tệp PDF trong kho CDE
+        // pkcs7Hex: Chuỗi chữ ký số PKCS#7 dạng Hex nhận từ kết quả xác thực giao dịch VNPT SmartCA
 
-        // TODO: Xử lý logic đổi code lấy token hoặc lưu trạng thái giao dịch ký số tại đây
+        if (!filePath || !pkcs7Hex) {
+            return res.status(400).json({ success: false, error: "Thiếu đường dẫn file hoặc chuỗi chữ ký PKCS#7!" });
+        }
 
-        // Sau khi xử lý xong, điều hướng (redirect) người dùng về lại module BIM-VDC trên hệ thống của anh
-        res.redirect('https://pvincons.cloud/content/bim-vdc/mir.html');
+        const cleanPath = String(filePath).replace(/^database\/bim-vdc\/?/, '');
+        const absolutePath = path.resolve(ROOT_DIR, cleanPath);
+
+        if (!fs.existsSync(absolutePath)) {
+            return res.status(404).json({ success: false, error: "Không tìm thấy file PDF trên server CDE." });
+        }
+
+        if (!canUserSignFile(req.authUser, cleanPath)) {
+            return res.status(403).json({ success: false, error: "Bạn không có quyền ký số tài liệu trong khu vực này của CDE!" });
+        }
+
+        // 1. Đọc nội dung file PDF gốc
+        const pdfBuffer = fs.readFileSync(absolutePath);
+
+        // 2. Chuyển đổi chuỗi chữ ký PKCS#7 từ dạng Hex sang Buffer
+        const signatureBuffer = Buffer.from(pkcs7Hex, 'hex');
+
+        // 3. Tiến hành nhúng chữ ký số vào PDF bằng thư viện node-signpdf
+        // (Thư viện tự động điền chuỗi chữ ký vào khoảng trống ByteRange /Contents đã được chuẩn bị sẵn)
+        const signedPdfBuffer = signPdf(pdfBuffer, signatureBuffer);
+
+        // 4. Ghi đè file PDF đã được đóng gói mã ký số hoàn chỉnh vào ổ đĩa server
+        fs.writeFileSync(absolutePath, signedPdfBuffer);
+
+        // 5. Lưu thông tin lịch sử chữ ký vào database signatures.json để giao diện mir.html hiển thị huy hiệu "✓ Đã ký"
+        saveVnptSignatureRecord(filePath, { pkcs7Hex, embedded: true }, req.authUser);
+
+        console.log(`[PV INCONS SERVER] Đã nhúng chữ ký số PKCS#7 thành công vào: ${filePath}`);
+
+        res.json({
+            success: true,
+            message: "Nhúng chữ ký số PKCS#7 vào file PDF thành công!",
+            filePath: filePath,
+            signedBy: req.authUser.fullName || req.authUser.username,
+            signedAt: new Date().toISOString()
+        });
+
+    } catch (err) {
+        console.error("Lỗi nhúng chữ ký PDF:", err);
+        res.status(500).json({ success: false, error: "Không thể nhúng chữ ký vào PDF: " + err.message });
+    }
+});
+
+// 10.6. API NHẬN THÔNG BÁO (notifyUrl) TỪ VNPT SMARTCA - server to server, HTTP POST JSON {tranId, refTranId, status}
+// Xác thực bằng SMARTCA_WEBHOOK_TOKEN gắn trong notifyUrl. Chỉ GHI NHẬN thông báo; việc lưu chữ ký vẫn do
+// gettraninfo (tranStatus = 1) quyết định, vì dữ liệu callback không thể kiểm chứng độc lập.
+function safeEqual(a, b) {
+    const x = Buffer.from(String(a || ''));
+    const y = Buffer.from(String(b || ''));
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+app.post('/api/smartca/callback', (req, res) => {
+    try {
+        const expected = process.env.SMARTCA_WEBHOOK_TOKEN;
+        if (!expected || !safeEqual(req.query.token, expected)) {
+            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+        const { tranId, refTranId, status } = req.body || {};
+        console.log('[VNPT SMARTCA NOTIFY]', JSON.stringify({ tranId, refTranId, status }));
+        res.json({ success: true, received: true });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// API Lấy danh sách chữ ký đã thực hiện
-app.get('/api/vnpt/signatures', (req, res) => {
+// API Lấy danh sách chữ ký đã thực hiện (yêu cầu đăng nhập)
+app.get('/api/vnpt/signatures', requireCdeAuth, (req, res) => {
     try {
         res.json(readSignaturesDB());
     } catch (error) {
