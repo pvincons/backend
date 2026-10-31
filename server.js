@@ -72,7 +72,7 @@ if (!fs.existsSync(USER_FILE_PATH)) {
 }
 
 // ===============================================================
-// 3. PROXY CHO REVIT SERVER ADMINISTRATOR
+// 3. PROXY CHO REVIT SERVER ADMINISTRATOR (Chuẩn hóa trả về JSON)
 // ===============================================================
 app.use(
     '/RevitServerAdmin2027',
@@ -84,7 +84,12 @@ app.use(
             '^/RevitServerAdmin2027': '/RevitServerAdmin2027',
         },
         onError: (err, req, res) => {
-            res.status(500).send('Không thể kết nối tới Revit Server IIS service nội bộ!');
+            console.error('[REVIT SERVER PROXY ERROR]:', err.message);
+            res.status(500).json({
+                success: false,
+                error: 'Không thể kết nối tới Revit Server IIS service nội bộ!',
+                details: err.message
+            });
         }
     })
 );
@@ -125,6 +130,7 @@ app.post('/api/auth/login', (req, res) => {
             user: tokenPayload
         });
     } catch (error) {
+        console.error('[LOGIN ERROR]:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -153,6 +159,7 @@ function requireCdeAuth(req, res, next) {
         req.authUser = user;
         next();
     } catch (error) {
+        console.error('[AUTH ERROR]:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 }
@@ -501,11 +508,12 @@ app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
 });
 
 // ===============================================================
-// 10. CHUẨN HÓA VNPT SMARTCA API (CSC STANDARD SP 769)
+// 10. CHUẨN HÓA VNPT SMARTCA API (CSC STANDARD SP 769 - Kèm Timeout)
 // ===============================================================
 const VNPT_SMARTCA_BASE_URL = process.env.VNPT_SMARTCA_BASE_URL || 'https://rmgateway.vnptit.vn/sca/sp769';
 const VNPT_SMARTCA_SP_ID = process.env.VNPT_SMARTCA_SP_ID || '';
 const VNPT_SMARTCA_SP_PASSWORD = process.env.VNPT_SMARTCA_SP_PASSWORD || '';
+const SMARTCA_TIMEOUT_MS = 15000; // 15 giây timeout chống treo kết nối
 
 const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
 if (!fs.existsSync(SIGNATURES_FILE_PATH)) {
@@ -544,10 +552,13 @@ function hashCdeFileForSmartCA(filePath) {
 
 // 10.1 API Lấy Chứng thư số của Thuê bao (v1/credentials/get_certificate)
 app.post('/api/smartca/credentials/get_certificate', requireCdeAuth, async (req, res) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
     try {
         const { userId, serialNumber } = req.body;
         const user_id = userId || (req.authUser ? req.authUser.phone : '');
         if (!user_id) {
+            clearTimeout(timeoutId);
             return res.status(400).json({ success: false, error: 'Thiếu thông tin số CCCD/MST của thuê bao!' });
         }
 
@@ -562,8 +573,10 @@ app.post('/api/smartca/credentials/get_certificate', requireCdeAuth, async (req,
                 user_id: user_id,
                 serial_number: serialNumber || "",
                 transaction_id: transactionId
-            })
+            }),
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         const data = await response.json();
         if (!response.ok || data.message !== 'Success') {
@@ -572,21 +585,29 @@ app.post('/api/smartca/credentials/get_certificate', requireCdeAuth, async (req,
 
         res.json({ success: true, ...data });
     } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
+        }
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 10.2 API Gửi Yêu cầu Ký số (v1/signatures/sign) -> Sửa sign_files thành sign_file đúng chuẩn SP 769
+// 10.2 API Gửi Yêu cầu Ký số (v1/signatures/sign)
 app.post('/api/smartca/signatures/sign', requireCdeAuth, async (req, res) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
     try {
         const { userId, serialNumber, filePath, docId } = req.body;
         const user_id = userId || (req.authUser ? req.authUser.phone : '');
         if (!user_id || !filePath) {
+            clearTimeout(timeoutId);
             return res.status(400).json({ success: false, error: 'Thiếu thông tin tài khoản hoặc đường dẫn file cần ký!' });
         }
 
         const fileInfo = hashCdeFileForSmartCA(filePath);
         if (fileInfo.error) {
+            clearTimeout(timeoutId);
             return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
         }
 
@@ -614,8 +635,10 @@ app.post('/api/smartca/signatures/sign', requireCdeAuth, async (req, res) => {
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/v1/signatures/sign`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         const data = await response.json();
         if (!response.ok) {
@@ -624,15 +647,22 @@ app.post('/api/smartca/signatures/sign', requireCdeAuth, async (req, res) => {
 
         res.json({ success: true, transaction_id: transactionId, ...data, fileInfo });
     } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
+        }
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // 10.3 API Kiểm tra Trạng thái Giao dịch (v1/signatures/sign/{tranId}/status)
 app.post('/api/smartca/signatures/status', requireCdeAuth, async (req, res) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
     try {
         const { tranCode, filePath, userId } = req.body;
         if (!tranCode) {
+            clearTimeout(timeoutId);
             return res.status(400).json({ success: false, error: 'Thiếu mã giao dịch tranCode!' });
         }
 
@@ -642,8 +672,10 @@ app.post('/api/smartca/signatures/status', requireCdeAuth, async (req, res) => {
             body: JSON.stringify({
                 sp_id: VNPT_SMARTCA_SP_ID,
                 sp_password: VNPT_SMARTCA_SP_PASSWORD
-            })
+            }),
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         const data = await response.json();
         if (!response.ok || data.message !== 'SUCCESS') {
@@ -665,6 +697,10 @@ app.post('/api/smartca/signatures/status', requireCdeAuth, async (req, res) => {
 
         res.json({ success: true, ...data });
     } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
+        }
         res.status(500).json({ success: false, error: error.message });
     }
 });
