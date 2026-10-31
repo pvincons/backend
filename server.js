@@ -848,6 +848,26 @@ app.post('/api/smartca/signatures/status', requireCdeAuth, async (req, res) => {
     }
 });
 
+// Hàm khôi phục và kiểm tra các giao dịch dang dở khi khởi động lại server
+function resumeSmartCaTransactions() {
+    try {
+        const db = readSmartCaTxDB();
+        let changed = false;
+        Object.values(db).forEach(tx => {
+            if (tx.state !== 'pending') return;
+            if (Date.now() > tx.expiresAt + 60000) {
+                tx.state = 'failed';
+                tx.completedAt = new Date().toISOString();
+                tx.error = 'Giao dịch đã hết hạn (server khởi động lại).';
+                changed = true;
+            }
+        });
+        if (changed) writeSmartCaTxDB(db);
+    } catch (e) {
+        console.error('Lỗi khởi động SmartCA transactions:', e);
+    }
+}
+
 resumeSmartCaTransactions();
 
 // ===============================================================
