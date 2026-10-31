@@ -59,7 +59,7 @@ if (!fs.existsSync(BASE_DATABASE_DIR)) {
     fs.mkdirSync(BASE_DATABASE_DIR, { recursive: true });
 }
 
-// Bổ sung hàm tiện ích đọc/ghi JSON an toàn
+// Hàm tiện ích đọc/ghi JSON an toàn
 function readJsonObject(filePath, defaultVal = {}) {
     try {
         if (fs.existsSync(filePath)) {
@@ -208,9 +208,10 @@ function requireCdeAuth(req, res, next) {
 }
 
 // ===============================================================
-// 10. TÍCH HỢP VNPT SMARTCA (CSC Standard & OAuth2 - Tài liệu v1.1)
+// 10. TÍCH HỢP VNPT SMARTCA (CSC Standard & OAuth2 - PRODUCTION)
 // ===============================================================
-const VNPT_SMARTCA_BASE_URL = (process.env.VNPT_SMARTCA_BASE_URL || 'https://rmgateway.vnptit.vn').replace(/\/+$/, '');
+// Đã chuyển địa chỉ mặc định sang PRODUCTION (https://gwsca.vnpt.vn) theo Mục 2 của tài liệu
+const VNPT_SMARTCA_BASE_URL = (process.env.VNPT_SMARTCA_BASE_URL || 'https://gwsca.vnpt.vn').replace(/\/+$/, '');
 const VNPT_SMARTCA_CLIENT_ID = process.env.VNPT_SMARTCA_CLIENT_ID || '';
 const VNPT_SMARTCA_CLIENT_SECRET = process.env.VNPT_SMARTCA_CLIENT_SECRET || '';
 
@@ -223,6 +224,7 @@ if (!fs.existsSync(SMARTCA_TX_FILE_PATH)) writeJsonObject(SMARTCA_TX_FILE_PATH, 
 const readSignaturesDB = () => readJsonObject(SIGNATURES_FILE_PATH);
 const readSmartCaTxDB = () => readJsonObject(SMARTCA_TX_FILE_PATH);
 
+// Lấy OAuth2 Access Token từ Endpoint Production (/auth/token)
 async function getSmartCaAccessToken() {
     try {
         const params = new URLSearchParams();
@@ -250,7 +252,7 @@ async function getSmartCaAccessToken() {
 
 async function smartCaApiCall(endpoint, payloadOrParams, method = 'POST') {
     const token = await getSmartCaAccessToken();
-    if (!token) throw new Error('Không thể lấy OAuth2 Access Token từ VNPT SmartCA Authentication Service!');
+    if (!token) throw new Error('Không thể lấy OAuth2 Access Token từ VNPT SmartCA Production Service!');
 
     const headers = {
         'Authorization': `Bearer ${token}`,
@@ -272,7 +274,7 @@ async function smartCaApiCall(endpoint, payloadOrParams, method = 'POST') {
     return { httpStatus: response.status, data };
 }
 
-// 10.1 API Lấy danh sách Credential[cite: 16]
+// 10.1 API Lấy danh sách Credential (/csc/credentials/list)
 app.post('/api/smartca/credentials/list', requireCdeAuth, async (req, res) => {
     try {
         const r = await smartCaApiCall('/csc/credentials/list', {});
@@ -285,7 +287,7 @@ app.post('/api/smartca/credentials/list', requireCdeAuth, async (req, res) => {
     }
 });
 
-// 10.2 API Lấy thông tin chi tiết Credential[cite: 16]
+// 10.2 API Lấy thông tin chi tiết Credential (/csc/credentials/info)
 app.post('/api/smartca/credentials/info', requireCdeAuth, async (req, res) => {
     try {
         const { credentialId, certificates = 'chain', certInfo = true, authInfo = true } = req.body;
@@ -301,7 +303,7 @@ app.post('/api/smartca/credentials/info', requireCdeAuth, async (req, res) => {
     }
 });
 
-// 10.3 API Gửi yêu cầu ký Hash[cite: 18]
+// 10.3 API Gửi yêu cầu ký Hash (/csc/signature/signhash)
 app.post('/api/smartca/signatures/signhash', requireCdeAuth, async (req, res) => {
     try {
         const { credentialId, refTranId, description, filePath } = req.body;
@@ -347,7 +349,7 @@ app.post('/api/smartca/signatures/signhash', requireCdeAuth, async (req, res) =>
     }
 });
 
-// 10.4 API Kiểm tra trạng thái giao dịch ký số[cite: 20]
+// 10.4 API Kiểm tra trạng thái giao dịch ký số (/csc/credentials/gettraninfo)
 app.post('/api/smartca/signatures/gettraninfo', requireCdeAuth, async (req, res) => {
     try {
         const { tranId } = req.body;
@@ -446,7 +448,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'CDE Backend Server đang hoạt động ổn định!' });
+    res.json({ status: 'ok', message: 'CDE Backend Server đang hoạt động ổn định trên môi trường PRODUCTION!' });
 });
 
 app.get('/api/cde-files', (req, res) => {
@@ -533,5 +535,5 @@ app.use('/files', express.static(ROOT_DIR));
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 PV INCONS CDE Backend Server đang chạy tại cổng ${PORT}`);
+    console.log(`🚀 PV INCONS CDE Backend Server đang chạy tại cổng ${PORT} [PRODUCTION]`);
 });
