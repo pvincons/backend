@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
@@ -18,8 +18,20 @@ app.set('trust proxy', true);
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-const JWT_SECRET = process.env.JWT_SECRET || 'PV_INCONS_SECRET_KEY_2026';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const JWT_SECRET = process.env.JWT_SECRET || (IS_PRODUCTION ? '' : 'PV_INCONS_SECRET_KEY_2026');
 const PORT = process.env.PORT || 3000;
+
+// Production: bắt buộc có đủ biến môi trường (thiếu thì dừng, không dùng giá trị mặc định)
+if (IS_PRODUCTION) {
+    const missing = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET']
+        .filter(k => !process.env[k] || !String(process.env[k]).trim());
+    if (missing.length || JWT_SECRET === 'PV_INCONS_SECRET_KEY_2026') {
+        console.error('[PV INCONS SERVER] LỖI CẤU HÌNH: file .env chưa được nạp hoặc thiếu/không an toàn:',
+            missing.length ? missing.join(', ') : 'JWT_SECRET đang dùng giá trị mặc định');
+        process.exit(1);
+    }
+}
 
 // Middleware ghi log request thời gian thực
 app.use((req, res, next) => {
@@ -624,7 +636,8 @@ app.post('/api/vnpt/token', requireCdeAuth, async (req, res) => {
 // 10.2. API Lấy danh sách Chứng thư số (List credential)
 app.post('/api/vnpt/credentials/list', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.headers.authorization ? req.headers.authorization.replace('Bearer ', '') : req.body.access_token;
+        const accessToken = req.body && req.body.access_token;
+        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/list`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
@@ -641,7 +654,8 @@ app.post('/api/vnpt/credentials/list', requireCdeAuth, async (req, res) => {
 // 10.3. API Lấy thông tin chi tiết Chứng thư số (Credential Info)
 app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.headers.authorization ? req.headers.authorization.replace('Bearer ', '') : req.body.access_token;
+        const accessToken = req.body && req.body.access_token;
+        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const { credentialId, certificates, certInfo, authInfo } = req.body;
 
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
@@ -665,7 +679,8 @@ app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
 // 10.4. API Gửi yêu cầu ký Hash (SignHash) tới VNPT SmartCA
 app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.headers.authorization ? req.headers.authorization.replace('Bearer ', '') : req.body.access_token;
+        const accessToken = req.body && req.body.access_token;
+        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const { credentialId, filePath, description, notifyUrl } = req.body;
 
         const fileInfo = hashCdeFile(filePath);
@@ -678,7 +693,7 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             body: JSON.stringify({
                 credentialId: credentialId,
                 refTranId: refTranId,
-                notifyUrl: notifyUrl || '',
+                ...(notifyUrl ? { notifyUrl } : {}),
                 description: description || 'Ký số tài liệu CDE PV Incons qua VNPT SmartCA',
                 datas: [
                     {
@@ -701,7 +716,8 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
 // 10.5. API Kiểm tra trạng thái giao dịch ký số (Get Transaction Info)
 app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.headers.authorization ? req.headers.authorization.replace('Bearer ', '') : req.body.access_token;
+        const accessToken = req.body && req.body.access_token;
+        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const { tranId, filePath } = req.body;
 
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/gettraninfo`, {
@@ -713,13 +729,27 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
         const data = await response.json();
         if (!response.ok) return res.status(response.status).json({ success: false, error: data.message || 'Lỗi kiểm tra trạng thái giao dịch' });
 
-        if (data.content && (data.content.tranStatus === 1 || data.content.tranStatus === 4000 || data.code === 0)) {
-            if (filePath) {
-                saveVnptSignatureRecord(filePath, data.content, req.authUser);
-            }
+        // Mã trạng thái giao dịch theo tài liệu VNPT SmartCA v1.1 (mục 5.2.5)
+        const TRAN_STATUS = {
+            1: 'SUCCESS',
+            4000: 'WAITING_FOR_SIGNER_CONFIRM',
+            4001: 'EXPIRED',
+            4002: 'SIGNER_REJECTED',
+            4003: 'AUTHORIZE_KEY_FAILED',
+            4004: 'SIGN_FAILED'
+        };
+
+        if (data.code !== 0 || !data.content) {
+            return res.status(400).json({ success: false, error: data.message || data.codeDesc || 'Không lấy được trạng thái giao dịch ký số' });
         }
 
-        res.json({ success: true, ...data });
+        const tranStatus = data.content.tranStatus;
+        // CHỈ ghi nhận chữ ký khi giao dịch thành công (tranStatus = 1). 4000 là đang chờ người ký xác nhận.
+        if (tranStatus === 1 && filePath) {
+            saveVnptSignatureRecord(filePath, data.content, req.authUser);
+        }
+
+        res.json({ success: true, ...data, tranStatus, tranStatusName: TRAN_STATUS[tranStatus] || 'UNKNOWN' });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
