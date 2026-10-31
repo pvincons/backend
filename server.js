@@ -643,7 +643,7 @@ app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
     try {
         const accessToken = req.headers.authorization ? req.headers.authorization.replace('Bearer ', '') : req.body.access_token;
         const { credentialId, certificates, certInfo, authInfo } = req.body;
-        
+
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
@@ -720,6 +720,22 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
         }
 
         res.json({ success: true, ...data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 10.6. API NHẬN CALLBACK TỪ VNPT SMARTCA
+app.all('/api/smartca/callback', (req, res) => {
+    try {
+        // Lấy các tham số trả về từ VNPT SmartCA (như code, state, tranId, v.v.)
+        const callbackData = req.method === 'GET' ? req.query : req.body;
+        console.log('[VNPT SMARTCA CALLBACK] Nhận dữ liệu phản hồi:', callbackData);
+
+        // TODO: Xử lý logic đổi code lấy token hoặc lưu trạng thái giao dịch ký số tại đây
+
+        // Sau khi xử lý xong, điều hướng (redirect) người dùng về lại module BIM-VDC trên hệ thống của anh
+        res.redirect('https://pvincons.cloud/content/bim-vdc/mir.html');
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
