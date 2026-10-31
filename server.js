@@ -19,7 +19,14 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-const JWT_SECRET = process.env.JWT_SECRET || 'PV_INCONS_SECRET_KEY_2026';
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+    if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+        console.error('❌ Thiếu JWT_SECRET trong .env (bắt buộc khi NODE_ENV=production). Server dừng để tránh dùng khóa mặc định.');
+        process.exit(1);
+    }
+    console.warn('⚠️ Chưa đặt JWT_SECRET trong .env - đang dùng khóa mặc định (CHỈ dùng khi phát triển).');
+    return 'PV_INCONS_SECRET_KEY_2026';
+})();
 const PORT = process.env.PORT || 3000;
 
 // Middleware ghi log request thời gian thực
@@ -50,7 +57,11 @@ if (!fs.existsSync(ROOT_DIR)) {
 }
 
 if (!fs.existsSync(USER_FILE_PATH)) {
-    const defaultPasswordHash = bcrypt.hashSync("123456", 10);
+    const bootstrapPassword = process.env.ADMIN_DEFAULT_PASSWORD || crypto.randomBytes(9).toString('base64url');
+    if (!process.env.ADMIN_DEFAULT_PASSWORD) {
+        console.warn(`⚠️ Đã tạo tài khoản admin lần đầu. Mật khẩu tạm (chỉ hiển thị 1 lần, hãy đổi ngay): ${bootstrapPassword}`);
+    }
+    const defaultPasswordHash = bcrypt.hashSync(bootstrapPassword, 10);
     const defaultUsers = [
         {
             "id": 1,
@@ -508,211 +519,561 @@ app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
 });
 
 // ===============================================================
-// 10. CHUẨN HÓA VNPT SMARTCA API (CSC STANDARD SP 769 - Kèm Timeout)
+// 10. TÍCH HỢP VNPT SMARTCA (SP 769 - Tài liệu tích hợp v4.0, luồng mục 3)
+//     Luồng: get_certificate -> sign (hash) -> chờ thuê bao xác nhận trên app
+//            -> status (server tự kiểm tra, có thể được webhook "đánh thức")
+//     Mọi dữ liệu giao dịch được lưu ở SERVER, client chỉ giữ tran_code.
 // ===============================================================
-const VNPT_SMARTCA_BASE_URL = process.env.VNPT_SMARTCA_BASE_URL || 'https://rmgateway.vnptit.vn/sca/sp769';
+const VNPT_SMARTCA_BASE_URL = (process.env.VNPT_SMARTCA_BASE_URL || 'https://rmgateway.vnptit.vn/sca/sp769').replace(/\/+$/, '');
 const VNPT_SMARTCA_SP_ID = process.env.VNPT_SMARTCA_SP_ID || '';
 const VNPT_SMARTCA_SP_PASSWORD = process.env.VNPT_SMARTCA_SP_PASSWORD || '';
-const SMARTCA_TIMEOUT_MS = 15000; // 15 giây timeout chống treo kết nối
+const SMARTCA_WEBHOOK_TOKEN = process.env.SMARTCA_WEBHOOK_TOKEN || ''; // bỏ trống = tắt webhook
+const SMARTCA_TIMEOUT_MS = 15000;                  // timeout mỗi lần gọi VNPT
+const SMARTCA_TX_TTL_MS = (299 + 30) * 1000;       // giao dịch hiệu lực ~299s (expired_in) + dung sai
+const SMARTCA_POLL_INTERVAL_MS = 4000;             // chu kỳ server hỏi trạng thái giao dịch
+const SMARTCA_SIGNABLE_EXT = /\.(pdf|ifc)$/i;
+const SMARTCA_FAILED_MSG = /reject|cancel|denied|declin|expire|timeout|từ chối|hủy|huỷ|hết hạn/i;
 
-const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
-if (!fs.existsSync(SIGNATURES_FILE_PATH)) {
-    fs.writeFileSync(SIGNATURES_FILE_PATH, JSON.stringify({}, null, 2), 'utf8');
+if (!VNPT_SMARTCA_SP_ID || !VNPT_SMARTCA_SP_PASSWORD) {
+    console.warn('⚠️ Thiếu VNPT_SMARTCA_SP_ID / VNPT_SMARTCA_SP_PASSWORD trong .env - chức năng ký số VNPT SmartCA sẽ không hoạt động.');
 }
 
-function readSignaturesDB() {
+const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
+const SMARTCA_TX_FILE_PATH = path.join(BASE_DATABASE_DIR, 'smartca_transactions.json');
+
+function readJsonObject(filePath) {
     try {
-        if (fs.existsSync(SIGNATURES_FILE_PATH)) {
-            return JSON.parse(fs.readFileSync(SIGNATURES_FILE_PATH, 'utf8') || '{}');
-        }
+        if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf8') || '{}');
     } catch (err) {
-        console.error('Lỗi đọc signatures.json:', err);
+        console.error('Lỗi đọc ' + path.basename(filePath) + ':', err);
     }
     return {};
 }
 
-function hashCdeFileForSmartCA(filePath) {
+function writeJsonObject(filePath, obj) {
+    // Ghi atomic (file tạm rồi rename) để tránh hỏng JSON khi server dừng giữa chừng
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+}
+
+if (!fs.existsSync(SIGNATURES_FILE_PATH)) writeJsonObject(SIGNATURES_FILE_PATH, {});
+if (!fs.existsSync(SMARTCA_TX_FILE_PATH)) writeJsonObject(SMARTCA_TX_FILE_PATH, {});
+
+const readSignaturesDB = () => readJsonObject(SIGNATURES_FILE_PATH);
+const readSmartCaTxDB = () => readJsonObject(SMARTCA_TX_FILE_PATH);
+
+function writeSmartCaTxDB(db) {
+    // Dọn giao dịch đã kết thúc quá 7 ngày
+    const limit = Date.now() - 7 * 24 * 3600 * 1000;
+    Object.keys(db).forEach(k => {
+        const tx = db[k];
+        if (tx && tx.state !== 'pending' && Date.parse(tx.completedAt || tx.createdAt || 0) < limit) delete db[k];
+    });
+    writeJsonObject(SMARTCA_TX_FILE_PATH, db);
+}
+
+// ---------- Tiện ích ----------
+
+// time_stamp theo tài liệu: YYYYMMddHHmmSS (giờ Việt Nam, UTC+7)
+function smartcaTimestamp(date = new Date()) {
+    const vn = new Date(date.getTime() + 7 * 3600 * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${vn.getUTCFullYear()}${p(vn.getUTCMonth() + 1)}${p(vn.getUTCDate())}${p(vn.getUTCHours())}${p(vn.getUTCMinutes())}${p(vn.getUTCSeconds())}`;
+}
+
+function maskId(id) {
+    const s = String(id || '');
+    return s.length <= 4 ? s : '*'.repeat(s.length - 4) + s.slice(-4);
+}
+
+function isAdminUser(user) {
+    return String(user.role || '').toUpperCase() === 'ADMIN' || String(user.permission || '').toUpperCase() === 'ADMIN';
+}
+
+function safeEqual(a, b) {
+    const ba = Buffer.from(String(a || ''));
+    const bb = Buffer.from(String(b || ''));
+    return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+
+// Gọi 1 endpoint VNPT SmartCA (POST JSON, có timeout). Không bao giờ ném lỗi vì body không phải JSON.
+async function smartcaPost(endpoint, body) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
     try {
-        const cleanPath = String(filePath).replace(/^database\/bim-vdc\/?/, '');
-        const fullPath = path.join(ROOT_DIR, cleanPath);
-
-        if (!fullPath.startsWith(ROOT_DIR) || !fs.existsSync(fullPath)) {
-            return { error: 'Không tìm thấy tệp tin cần ký trên hệ thống CDE!', status: 404 };
-        }
-
-        const fileBuffer = fs.readFileSync(fullPath);
-        const hashHex = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-        const fileName = path.basename(fullPath);
-
-        return { fileName, hashHex };
-    } catch (err) {
-        return { error: 'Lỗi băm tệp tin: ' + err.message, status: 500 };
+        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+        });
+        const text = await response.text();
+        let data;
+        try { data = text ? JSON.parse(text) : {}; }
+        catch (e) { data = { status_code: response.status, message: `Phản hồi không hợp lệ từ VNPT SmartCA (HTTP ${response.status})` }; }
+        return { httpStatus: response.status, data };
+    } finally {
+        clearTimeout(timer);
     }
 }
 
-// 10.1 API Lấy Chứng thư số của Thuê bao (v1/credentials/get_certificate)
+// Thành công = HTTP < 400 VÀ status_code trong body = 200 (bảng mã lỗi mục 3.1 nằm ở status_code)
+function smartcaCode(r) {
+    const n = Number(r.data && r.data.status_code);
+    return Number.isFinite(n) && n > 0 ? n : r.httpStatus;
+}
+function smartcaIsOk(r) {
+    return r.httpStatus < 400 && smartcaCode(r) === 200;
+}
+
+// Quy đổi mã lỗi VNPT -> HTTP trả về cho trình duyệt (không để lộ sp_password)
+function smartcaFail(res, r, fallbackMsg) {
+    const code = smartcaCode(r);
+    const msg = (r.data && r.data.message) || fallbackMsg;
+    let http = 502;
+    let prefix = '';
+    if (code === 400) http = 400;
+    else if (code === 401) { http = 400; prefix = 'Thông tin tài khoản SP/thuê bao không hợp lệ: '; }
+    else if (code === 403) { http = 403; prefix = 'Chứng thư số không hợp lệ: '; }
+    else if (code >= 500) { http = 502; prefix = 'VNPT SmartCA đang lỗi xử lý: '; }
+    return res.status(http).json({ success: false, error: prefix + msg, smartca_status_code: code });
+}
+
+function smartcaCatch(res, error) {
+    if (error && error.name === 'AbortError') {
+        return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
+    }
+    console.error('[SMARTCA ERROR]:', error);
+    return res.status(500).json({ success: false, error: error && error.message ? error.message : 'Lỗi không xác định' });
+}
+
+// user_id gửi VNPT = CCCD/CMND/Hộ chiếu/MST của thuê bao (KHÔNG phải số điện thoại).
+// Nếu hồ sơ user trong users.json đã gắn số định danh thì bắt buộc dùng số đó.
+function resolveSmartCaUserId(authUser, requested) {
+    const registered = String(authUser.smartcaUserId || authUser.cccd || authUser.idNumber || authUser.taxCode || authUser.mst || '').trim();
+    const input = String(requested || '').trim();
+    if (registered) {
+        if (input && input.toLowerCase() !== registered.toLowerCase()) {
+            return { status: 403, error: 'Tài khoản CDE của bạn đã gắn với một số định danh VNPT SmartCA khác, không thể ký bằng số này!' };
+        }
+        return { userId: registered };
+    }
+    if (!input) return { status: 400, error: 'Thiếu thông tin số CCCD/CMND/Hộ chiếu/MST của thuê bao!' };
+    if (!/^[A-Za-z0-9]{6,20}$/.test(input)) return { status: 400, error: 'Số CCCD/CMND/Hộ chiếu/MST không hợp lệ!' };
+    return { userId: input };
+}
+
+// Xác định file trong kho CDE một cách an toàn (chặn path traversal, kể cả thư mục trùng tiền tố)
+function resolveCdeFile(filePath) {
+    const key = normRecallKey(filePath);
+    const rel = key.replace(/^database\/bim-vdc\/?/, '');
+    if (!rel) return { status: 400, error: 'Thiếu đường dẫn file cần ký!' };
+    const root = path.resolve(ROOT_DIR);
+    const fullPath = path.resolve(root, rel);
+    if (!fullPath.startsWith(root + path.sep)) return { status: 400, error: 'Đường dẫn không hợp lệ!' };
+    let stat;
+    try { stat = fs.statSync(fullPath); } catch (e) { stat = null; }
+    if (!stat || !stat.isFile()) return { status: 404, error: 'Không tìm thấy tệp tin cần ký trên hệ thống CDE!' };
+    return { key, rel, fullPath, stat, fileName: path.basename(fullPath) };
+}
+
+// SHA-256 dạng hex (đúng yêu cầu "hex với hash"), băm theo stream để không nạp file lớn vào RAM
+function hashFileSha256(fullPath) {
+    return new Promise((resolve, reject) => {
+        const h = crypto.createHash('sha256');
+        fs.createReadStream(fullPath)
+            .on('error', reject)
+            .on('data', chunk => h.update(chunk))
+            .on('end', () => resolve(h.digest('hex')));
+    });
+}
+
+function isCertUsable(cert) {
+    if (!cert) return false;
+    if (cert.cert_status && !/đang hoạt động|active/i.test(String(cert.cert_status))) return false;
+    const now = Date.now();
+    const to = Date.parse(cert.cert_valid_to || '');
+    const from = Date.parse(cert.cert_valid_from || '');
+    if (Number.isFinite(to) && to < now) return false;
+    if (Number.isFinite(from) && from > now) return false;
+    return true;
+}
+
+async function fetchSmartCaCertificates(userId, serialNumber) {
+    const r = await smartcaPost('/v1/credentials/get_certificate', {
+        sp_id: VNPT_SMARTCA_SP_ID,
+        sp_password: VNPT_SMARTCA_SP_PASSWORD,
+        user_id: userId,
+        serial_number: serialNumber || '',
+        transaction_id: crypto.randomUUID()
+    });
+    const raw = r.data && r.data.data ? r.data.data.user_certificates : null;
+    const certs = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    return { r, ok: smartcaIsOk(r), certs };
+}
+
+// ---------- 10.1 get_certificate (mục 3.2) ----------
 app.post('/api/smartca/credentials/get_certificate', requireCdeAuth, async (req, res) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
     try {
-        const { userId, serialNumber } = req.body;
-        const user_id = userId || (req.authUser ? req.authUser.phone : '');
-        if (!user_id) {
-            clearTimeout(timeoutId);
-            return res.status(400).json({ success: false, error: 'Thiếu thông tin số CCCD/MST của thuê bao!' });
-        }
+        const idRes = resolveSmartCaUserId(req.authUser, req.body && req.body.userId);
+        if (idRes.error) return res.status(idRes.status).json({ success: false, error: idRes.error });
 
-        const transactionId = 'SP_CA_' + Date.now();
+        const { r, ok, certs } = await fetchSmartCaCertificates(idRes.userId, (req.body && req.body.serialNumber) || '');
+        if (!ok) return smartcaFail(res, r, 'Không thể lấy thông tin chứng thư số từ VNPT SmartCA');
+        if (!certs.length) return res.status(404).json({ success: false, error: 'Không tìm thấy chứng thư số nào của thuê bao này!' });
 
-        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/v1/credentials/get_certificate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({
-                sp_id: VNPT_SMARTCA_SP_ID,
-                sp_password: VNPT_SMARTCA_SP_PASSWORD,
-                user_id: user_id,
-                serial_number: serialNumber || "",
-                transaction_id: transactionId
-            }),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-
-        const data = await response.json();
-        if (!response.ok || data.message !== 'Success') {
-            return res.status(response.status || 400).json({ success: false, error: data.message || 'Không thể lấy thông tin CTS từ VNPT SmartCA' });
-        }
-
-        res.json({ success: true, ...data });
+        // Chỉ trả các trường hiển thị; cert_data/chain_data giữ ở server
+        const list = certs.map(c => ({
+            service_type: c.service_type || '',
+            service_name: c.service_name || '',
+            serial_number: c.serial_number,
+            cert_status: c.cert_status || '',
+            cert_subject: c.cert_subject || '',
+            cert_valid_from: c.cert_valid_from || '',
+            cert_valid_to: c.cert_valid_to || '',
+            usable: isCertUsable(c)
+        }));
+        res.json({ success: true, status_code: 200, message: 'Success', data: { user_certificates: list } });
     } catch (error) {
-        clearTimeout(timeoutId);
-        if (error.name === 'AbortError') {
-            return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
-        }
-        res.status(500).json({ success: false, error: error.message });
+        smartcaCatch(res, error);
     }
 });
 
-// 10.2 API Gửi Yêu cầu Ký số (v1/signatures/sign)
+// ---------- 10.2 sign (mục 3.3) ----------
 app.post('/api/smartca/signatures/sign', requireCdeAuth, async (req, res) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
     try {
-        const { userId, serialNumber, filePath, docId } = req.body;
-        const user_id = userId || (req.authUser ? req.authUser.phone : '');
-        if (!user_id || !filePath) {
-            clearTimeout(timeoutId);
-            return res.status(400).json({ success: false, error: 'Thiếu thông tin tài khoản hoặc đường dẫn file cần ký!' });
+        const { userId, serialNumber, filePath } = req.body || {};
+        if (!filePath) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file cần ký!' });
+        if (!serialNumber) return res.status(400).json({ success: false, error: 'Vui lòng chọn chứng thư số để ký!' });
+
+        const idRes = resolveSmartCaUserId(req.authUser, userId);
+        if (idRes.error) return res.status(idRes.status).json({ success: false, error: idRes.error });
+
+        const file = resolveCdeFile(filePath);
+        if (file.error) return res.status(file.status).json({ success: false, error: file.error });
+        if (!SMARTCA_SIGNABLE_EXT.test(file.fileName)) {
+            return res.status(400).json({ success: false, error: 'Chỉ hỗ trợ ký số tệp .pdf và .ifc!' });
         }
 
-        const fileInfo = hashCdeFileForSmartCA(filePath);
-        if (fileInfo.error) {
-            clearTimeout(timeoutId);
-            return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
+        // Kiểm tra quyền ở SERVER (không chỉ ẩn nút ở giao diện): Full Control / Read & Write trên thư mục chứa file
+        if (!canUserWriteReview(req.authUser, getContainerFromPath(file.rel))) {
+            return res.status(403).json({ success: false, error: 'Bạn không có quyền ký số trên thư mục này!' });
+        }
+        if (readRecallsDB()[file.key]) {
+            return res.status(409).json({ success: false, error: 'Tệp đã bị thu hồi, không thể ký số!' });
         }
 
-        const transactionId = 'SP_CA_' + Date.now();
-        const documentId = docId || ('doc-' + Math.random().toString(36).substr(2, 6));
+        // Không cho tạo 2 giao dịch đang chờ cho cùng 1 file
+        const txDb = readSmartCaTxDB();
+        const dup = Object.values(txDb).find(t => t.state === 'pending' && t.filePath === file.key && Date.now() < t.expiresAt);
+        if (dup) {
+            return res.status(409).json({ success: false, error: `Tệp này đang có giao dịch ký chờ xác nhận (mã tài liệu ${dup.docId}). Vui lòng xác nhận trên app hoặc đợi hết hạn.` });
+        }
 
-        const payload = {
+        // Xác thực chứng thư ngay ở server (đúng thuê bao, đang hoạt động, còn hạn)
+        const { r: certR, ok: certOk, certs } = await fetchSmartCaCertificates(idRes.userId, serialNumber);
+        if (!certOk) return smartcaFail(res, certR, 'Không thể xác thực chứng thư số với VNPT SmartCA');
+        const cert = certs.find(c => String(c.serial_number || '').toLowerCase() === String(serialNumber).toLowerCase());
+        if (!cert) return res.status(404).json({ success: false, error: 'Chứng thư số đã chọn không thuộc thuê bao này!' });
+        if (!isCertUsable(cert)) return res.status(403).json({ success: false, error: 'Chứng thư số đã hết hạn hoặc không ở trạng thái hoạt động!' });
+
+        const hashHex = await hashFileSha256(file.fullPath);
+        // doc_id phải hiển thị đồng thời trên giao diện của SP và trên app SmartCA (mục 3.3)
+        const docId = 'CDE-' + hashHex.slice(0, 6).toUpperCase() + '-' + crypto.randomBytes(2).toString('hex').toUpperCase();
+        const transactionId = crypto.randomUUID(); // duy nhất theo yêu cầu tài liệu
+
+        const signR = await smartcaPost('/v1/signatures/sign', {
             sp_id: VNPT_SMARTCA_SP_ID,
             sp_password: VNPT_SMARTCA_SP_PASSWORD,
-            user_id: user_id,
+            user_id: idRes.userId,
             transaction_id: transactionId,
-            transaction_desc: `PV INCONS CDE - Ky so ${fileInfo.fileName}`,
-            serial_number: serialNumber || "",
-            time_stamp: new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z',
-            sign_file: [
-                {
-                    file_type: path.extname(fileInfo.fileName).replace('.', '') || 'pdf',
-                    data_to_be_signed: fileInfo.hashHex,
-                    doc_id: documentId,
-                    sign_type: 'hash'
-                }
-            ]
+            transaction_desc: `PV INCONS CDE - Ky so ${file.fileName}`.slice(0, 200),
+            serial_number: cert.serial_number,
+            time_stamp: smartcaTimestamp(),
+            sign_files: [{
+                file_type: path.extname(file.fileName).replace('.', '').toLowerCase(),
+                data_to_be_signed: hashHex,
+                doc_id: docId,
+                sign_type: 'hash'
+            }]
+        });
+
+        const body = signR.data || {};
+        const inner = body.data || {};
+        const tranCode = inner.tran_code;
+        if (!smartcaIsOk(signR) || !tranCode) {
+            return smartcaFail(res, signR, 'Lỗi gửi yêu cầu ký số tới VNPT SmartCA');
+        }
+
+        const now = Date.now();
+        const freshDb = readSmartCaTxDB();
+        freshDb[tranCode] = {
+            tranCode,
+            transactionId,
+            userId: idRes.userId,
+            serialNumber: cert.serial_number,
+            filePath: file.key,
+            fileName: file.fileName,
+            fileSize: file.stat.size,
+            fileMtimeMs: file.stat.mtimeMs,
+            hashAlgorithm: 'SHA-256',
+            hashHex,
+            docId,
+            certificate: {
+                service_type: cert.service_type || '',
+                service_name: cert.service_name || '',
+                serial_number: cert.serial_number,
+                cert_subject: cert.cert_subject || '',
+                cert_valid_from: cert.cert_valid_from || '',
+                cert_valid_to: cert.cert_valid_to || '',
+                cert_data: cert.cert_data || '',
+                chain_data: cert.chain_data || null
+            },
+            createdBy: req.authUser.username,
+            createdByName: req.authUser.fullName || req.authUser.username,
+            createdAt: new Date(now).toISOString(),
+            expiresAt: now + SMARTCA_TX_TTL_MS,
+            state: 'pending',
+            message: body.message || 'sig_wait_for_user_confirm'
         };
+        writeSmartCaTxDB(freshDb);
+        startSmartCaWatcher(tranCode);
 
-        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/v1/signatures/sign`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: controller.signal
+        res.json({
+            success: true,
+            message: body.message || 'sig_wait_for_user_confirm',
+            tran_code: tranCode,
+            transaction_id: transactionId,
+            doc_id: docId,
+            file_name: file.fileName,
+            hash_sha256: hashHex,
+            cert_subject: cert.cert_subject || '',
+            expires_in_seconds: Math.round(SMARTCA_TX_TTL_MS / 1000)
         });
-        clearTimeout(timeoutId);
-
-        const data = await response.json();
-        if (!response.ok) {
-            return res.status(response.status || 400).json({ success: false, error: data.message || 'Lỗi gửi yêu cầu ký số tới VNPT SmartCA' });
-        }
-
-        res.json({ success: true, transaction_id: transactionId, ...data, fileInfo });
     } catch (error) {
-        clearTimeout(timeoutId);
-        if (error.name === 'AbortError') {
-            return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
+        smartcaCatch(res, error);
+    }
+});
+
+// ---------- Kiểm tra giao dịch phía server (mục 3.4) ----------
+const smartcaWatchers = new Map();
+const smartcaChecking = new Set();
+
+function finalizeSmartCaSuccess(tx, signatures) {
+    const sigDb = readSignaturesDB();
+    sigDb[tx.filePath] = {
+        filePath: tx.filePath,
+        fileName: tx.fileName,
+        docId: tx.docId,
+        transactionId: tx.transactionId,
+        tranCode: tx.tranCode,
+        subscriberIdMasked: maskId(tx.userId),
+        hashAlgorithm: tx.hashAlgorithm,
+        fileHash: tx.hashHex,
+        fileSize: tx.fileSize,
+        fileMtimeMs: tx.fileMtimeMs,
+        signatures,
+        certificate: tx.certificate,
+        signedBy: tx.createdByName,
+        signedByUsername: tx.createdBy,
+        signedAt: new Date().toISOString()
+    };
+    writeJsonObject(SIGNATURES_FILE_PATH, sigDb);
+}
+
+// Hỏi VNPT trạng thái 1 giao dịch và cập nhật kết quả vào DB. Idempotent, an toàn khi gọi trùng.
+async function checkSmartCaTransaction(tranCode) {
+    let db = readSmartCaTxDB();
+    let tx = db[tranCode];
+    if (!tx || tx.state !== 'pending' || smartcaChecking.has(tranCode)) return tx;
+
+    smartcaChecking.add(tranCode);
+    try {
+        const r = await smartcaPost(`/v1/signatures/sign/${encodeURIComponent(tranCode)}/status`, {
+            sp_id: VNPT_SMARTCA_SP_ID,
+            sp_password: VNPT_SMARTCA_SP_PASSWORD
+        });
+
+        db = readSmartCaTxDB();           // đọc lại sau await
+        tx = db[tranCode];
+        if (!tx || tx.state !== 'pending') return tx;
+
+        const sigs = r.data && r.data.data && Array.isArray(r.data.data.signatures) ? r.data.data.signatures : [];
+        const mine = sigs.find(s => s && s.doc_id === tx.docId && s.signature_value) || sigs.find(s => s && s.signature_value);
+
+        if (smartcaIsOk(r) && mine) {
+            tx.state = 'done';
+            tx.completedAt = new Date().toISOString();
+            tx.message = 'Ký số thành công';
+            db[tranCode] = tx;
+            finalizeSmartCaSuccess(tx, sigs.map(s => ({
+                doc_id: s.doc_id,
+                signature_value: s.signature_value,
+                timestamp_signature: s.timestamp_signature || null
+            })));
+            writeSmartCaTxDB(db);
+            return tx;
         }
+
+        const msg = (r.data && r.data.message) || '';
+        tx.lastCheckedAt = new Date().toISOString();
+        tx.message = msg || tx.message;
+
+        if (!smartcaIsOk(r) && SMARTCA_FAILED_MSG.test(msg)) {
+            tx.state = 'failed';
+            tx.completedAt = new Date().toISOString();
+            tx.error = 'Giao dịch bị từ chối hoặc đã hủy: ' + msg;
+        } else if (Date.now() > tx.expiresAt) {
+            tx.state = 'failed';
+            tx.completedAt = new Date().toISOString();
+            tx.error = 'Giao dịch đã hết hạn do thuê bao chưa xác nhận trên ứng dụng VNPT SmartCA.';
+        }
+        db[tranCode] = tx;
+        writeSmartCaTxDB(db);
+        return tx;
+    } finally {
+        smartcaChecking.delete(tranCode);
+    }
+}
+
+function startSmartCaWatcher(tranCode) {
+    if (smartcaWatchers.has(tranCode)) return;
+    const tick = async () => {
+        let keepGoing = true;
+        try {
+            const tx = await checkSmartCaTransaction(tranCode);
+            keepGoing = !!tx && tx.state === 'pending';
+        } catch (e) {
+            // Lỗi mạng/timeout tạm thời: thử lại ở chu kỳ sau, hết hạn sẽ tự dừng
+            const tx = readSmartCaTxDB()[tranCode];
+            keepGoing = !!tx && tx.state === 'pending' && Date.now() < tx.expiresAt + 60000;
+            if (!keepGoing) console.error('[SMARTCA WATCHER]', tranCode, e.message);
+        }
+        if (keepGoing) smartcaWatchers.set(tranCode, setTimeout(tick, SMARTCA_POLL_INTERVAL_MS));
+        else smartcaWatchers.delete(tranCode);
+    };
+    smartcaWatchers.set(tranCode, setTimeout(tick, SMARTCA_POLL_INTERVAL_MS));
+}
+
+// Khởi động lại server: tiếp tục theo dõi các giao dịch còn hiệu lực
+function resumeSmartCaTransactions() {
+    const db = readSmartCaTxDB();
+    let changed = false;
+    Object.values(db).forEach(tx => {
+        if (tx.state !== 'pending') return;
+        if (Date.now() > tx.expiresAt + 60000) {
+            tx.state = 'failed';
+            tx.completedAt = new Date().toISOString();
+            tx.error = 'Giao dịch đã hết hạn (server khởi động lại).';
+            changed = true;
+        } else {
+            startSmartCaWatcher(tx.tranCode);
+        }
+    });
+    if (changed) writeSmartCaTxDB(db);
+}
+
+// 10.3 Trình duyệt hỏi trạng thái - chỉ đọc kết quả do server theo dõi, KHÔNG nhận filePath từ client
+app.post('/api/smartca/signatures/status', requireCdeAuth, (req, res) => {
+    try {
+        const tranCode = String((req.body && req.body.tranCode) || '').trim();
+        if (!tranCode) return res.status(400).json({ success: false, error: 'Thiếu mã giao dịch tranCode!' });
+
+        const tx = readSmartCaTxDB()[tranCode];
+        if (!tx) return res.status(404).json({ success: false, state: 'failed', error: 'Không tìm thấy giao dịch ký số!' });
+        if (tx.createdBy !== req.authUser.username && !isAdminUser(req.authUser)) {
+            return res.status(403).json({ success: false, state: 'failed', error: 'Bạn không có quyền xem giao dịch này!' });
+        }
+
+        if (tx.state === 'pending') {
+            startSmartCaWatcher(tranCode); // đảm bảo có watcher
+            return res.json({
+                success: true, state: 'pending', doc_id: tx.docId, message: tx.message,
+                remaining_seconds: Math.max(0, Math.round((tx.expiresAt - Date.now()) / 1000))
+            });
+        }
+        if (tx.state === 'done') {
+            return res.json({ success: true, state: 'done', doc_id: tx.docId, message: tx.message, signedAt: tx.completedAt });
+        }
+        res.json({ success: false, state: 'failed', doc_id: tx.docId, error: tx.error || 'Giao dịch ký số không thành công!' });
+    } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 10.3 API Kiểm tra Trạng thái Giao dịch (v1/signatures/sign/{tranId}/status)
-app.post('/api/smartca/signatures/status', requireCdeAuth, async (req, res) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SMARTCA_TIMEOUT_MS);
+// 10.3b Webhook nhận thông báo từ CA (mục 3.5). Chỉ dùng như tín hiệu "đánh thức":
+//       nội dung webhook KHÔNG được tin trực tiếp, server luôn xác minh lại bằng API status.
+//       Bật bằng SMARTCA_WEBHOOK_TOKEN, đăng ký URL: https://<domain>/api/smartca/webhook?token=<TOKEN>
+app.post('/api/smartca/webhook', (req, res) => {
+    if (!SMARTCA_WEBHOOK_TOKEN) return res.status(404).json({ status_code: 404, message: 'Webhook chưa được bật' });
+    const provided = req.query.token || req.headers['x-webhook-token'] || '';
+    if (!safeEqual(provided, SMARTCA_WEBHOOK_TOKEN)) return res.status(401).json({ status_code: 401, message: 'Unauthorized' });
+
+    const b = req.body || {};
+    if (b.sp_id && b.sp_id !== VNPT_SMARTCA_SP_ID) return res.status(401).json({ status_code: 401, message: 'sp_id không hợp lệ' });
+
+    const tx = Object.values(readSmartCaTxDB()).find(t => t.transactionId === b.transaction_id);
+    res.json({ status_code: 200, message: 'SUCCESS' });
+    if (tx && tx.state === 'pending') {
+        checkSmartCaTransaction(tx.tranCode).catch(e => console.error('[SMARTCA WEBHOOK]', e.message));
+    }
+});
+
+// 10.4 Danh sách chữ ký đã lưu (kèm cờ "đã sửa sau khi ký"; không trả cert_data/signature_value)
+app.get('/api/smartca/signatures', requireCdeAuth, (req, res) => {
     try {
-        const { tranCode, filePath, userId } = req.body;
-        if (!tranCode) {
-            clearTimeout(timeoutId);
-            return res.status(400).json({ success: false, error: 'Thiếu mã giao dịch tranCode!' });
-        }
-
-        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/v1/signatures/sign/${tranCode}/status`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({
-                sp_id: VNPT_SMARTCA_SP_ID,
-                sp_password: VNPT_SMARTCA_SP_PASSWORD
-            }),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-
-        const data = await response.json();
-        if (!response.ok || data.message !== 'SUCCESS') {
-            return res.status(response.status || 400).json({ success: false, error: data.message || 'Giao dịch ký số chưa hoàn tất!' });
-        }
-
-        if (filePath && data.data && data.data.signatures) {
-            const db = readSignaturesDB();
-            const key = normRecallKey(filePath);
-            db[key] = {
-                filePath: key,
-                fileName: path.basename(filePath),
-                signatures: data.data.signatures,
-                signedBy: req.authUser ? (req.authUser.fullName || req.authUser.username) : userId,
-                signedAt: new Date().toISOString()
+        const db = readSignaturesDB();
+        const out = {};
+        Object.keys(db).forEach(key => {
+            const rec = db[key];
+            let modified = false;
+            if (rec.fileHash && rec.fileSize != null) {
+                try {
+                    const st = fs.statSync(path.resolve(ROOT_DIR, key.replace(/^database\/bim-vdc\/?/, '')));
+                    modified = st.size !== rec.fileSize || Math.abs(st.mtimeMs - rec.fileMtimeMs) > 1;
+                } catch (e) { modified = true; }
+            }
+            out[key] = {
+                filePath: rec.filePath,
+                fileName: rec.fileName,
+                docId: rec.docId || '',
+                signedBy: rec.signedBy,
+                signedAt: rec.signedAt,
+                fileHash: rec.fileHash || '',
+                certSubject: rec.certificate ? rec.certificate.cert_subject : '',
+                modified
             };
-            fs.writeFileSync(SIGNATURES_FILE_PATH, JSON.stringify(db, null, 2), 'utf8');
-        }
-
-        res.json({ success: true, ...data });
+        });
+        res.json(out);
     } catch (error) {
-        clearTimeout(timeoutId);
-        if (error.name === 'AbortError') {
-            return res.status(504).json({ success: false, error: 'Kết nối tới cổng VNPT SmartCA bị quá thời gian (Timeout).' });
-        }
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 10.4 API Lấy danh sách chữ ký đã lưu
-app.get(['/api/smartca/signatures', '/api/viettel/signatures'], requireCdeAuth, (req, res) => {
+// 10.5 Xuất "gói chữ ký" (JSON) gồm hash + signature_value + chứng thư + chuỗi chứng thư để lưu trữ/đối soát.
+//      Lưu ý: đây là chữ ký RỜI trên SHA-256 của toàn bộ file, chưa nhúng vào PDF (PAdES).
+app.get('/api/smartca/signatures/export', requireCdeAuth, (req, res) => {
     try {
-        res.json(readSignaturesDB());
+        const key = normRecallKey(req.query.path);
+        const rec = readSignaturesDB()[key];
+        if (!rec) return res.status(404).json({ success: false, error: 'Tệp này chưa có chữ ký số!' });
+        const pkg = {
+            format: 'PV-INCONS-SMARTCA-DETACHED-SIGNATURE/1.0',
+            note: 'Chữ ký rời trên SHA-256 của toàn bộ tệp (sign_type=hash). Chưa nhúng vào tệp PDF/IFC.',
+            file: { name: rec.fileName, path: rec.filePath, sizeBytes: rec.fileSize, hashAlgorithm: rec.hashAlgorithm, hash: rec.fileHash },
+            signing: { docId: rec.docId, transactionId: rec.transactionId, tranCode: rec.tranCode, signedBy: rec.signedBy, signedAt: rec.signedAt, subscriber: rec.subscriberIdMasked },
+            signatures: rec.signatures,
+            certificate: rec.certificate
+        };
+        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent((rec.fileName || 'file') + '.smartca-signature.json')}`);
+        res.json(pkg);
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+resumeSmartCaTransactions();
 
 // ===============================================================
 // 11. API THƯ MỤC & FILE CDE (ISO 19650)
