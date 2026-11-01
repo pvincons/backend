@@ -104,18 +104,19 @@ if (!fs.existsSync(USER_FILE_PATH)) {
 // 3. PROXY CHO REVIT SERVER ADMINISTRATOR
 // ===============================================================
 app.use(
-    '/RevitServerAdmin2027',
-    createProxyMiddleware({
-        target: 'https://localhost',
-        changeOrigin: true,
-        secure: false,
-        pathRewrite: {
-            '^/RevitServerAdmin2027': '/RevitServerAdmin2027',
-        },
-        onError: (err, req, res) => {
-            res.status(500).send('Không thể kết nối tới Revit Server IIS service nội bộ!');
+  '/RevitServerAdmin2027',
+  createProxyMiddleware({
+    target: 'https://localhost',
+    changeOrigin: true,
+    secure: false,
+    on: {
+      error: (err, req, res) => {
+        if (!res.headersSent) {
+          res.status(500).send('Không thể kết nối tới Revit Server IIS service nội bộ!');
         }
-    })
+      }
+    }
+  })
 );
 
 // ===============================================================
@@ -1117,11 +1118,11 @@ app.get('/api/cde-files', (req, res) => {
                 } catch (e) {
                     // Bỏ qua lỗi stat
                 }
-                fileList.push({ 
-                    name: file.name, 
-                    path: 'database/' + relPath, 
+                fileList.push({
+                    name: file.name,
+                    path: 'database/' + relPath,
                     type: file.isDirectory() ? 'folder' : 'file',
-                    size: size 
+                    size: size
                 });
                 if (file.isDirectory()) walkDir(fullPath, fileList);
             });
@@ -1341,7 +1342,43 @@ app.post('/api/chat/send', (req, res) => {
 });
 
 // ===============================================================
-// 13. STATIC SERVE & KHỞI ĐỘNG SERVER
+// 13. API tạo mới dự án và tự động sinh 4 thư mục chuẩn ISO 19650
+// ===============================================================
+
+app.post('/api/create-project', (req, res) => {
+    try {
+        const { parentPath, projectName } = req.body;
+        if (!projectName || !String(projectName).trim()) {
+            return res.status(400).json({ success: false, error: 'Vui lòng nhập tên dự án mới!' });
+        }
+
+        const cleanParent = (parentPath || 'database/bim-vdc').replace(/^database\/bim-vdc\/?/, '');
+        const projectRootPath = path.join(ROOT_DIR, cleanParent, projectName.trim());
+
+        // Kiểm tra xem thư mục dự án đã tồn tại chưa
+        if (fs.existsSync(projectRootPath)) {
+            return res.status(400).json({ success: false, error: 'Dự án hoặc thư mục này đã tồn tại!' });
+        }
+
+        // Tạo thư mục gốc của dự án và 4 thư mục con chuẩn ISO 19650
+        const isoSubFolders = ['01_WIP', '02_SHARED', '03_PUBLISHED', '04_ARCHIVE'];
+        
+        fs.mkdirSync(projectRootPath, { recursive: true });
+        isoSubFolders.forEach(subFolder => {
+            fs.mkdirSync(path.join(projectRootPath, subFolder), { recursive: true });
+        });
+
+        res.json({ 
+            success: true, 
+            message: `Đã tạo dự án "${projectName.trim()}" kèm 4 thư mục chuẩn ISO 19650 thành công!` 
+        });
+    } catch (error) { 
+        res.status(500).json({ success: false, error: error.message }); 
+    }
+});
+
+// ===============================================================
+// 14. STATIC SERVE & KHỞI ĐỘNG SERVER
 // ===============================================================
 app.use('/files', express.static(ROOT_DIR));
 
