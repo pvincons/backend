@@ -1080,12 +1080,25 @@ app.get('/api/files', (req, res) => {
         const targetDir = path.join(ROOT_DIR, subPath);
         if (!fs.existsSync(targetDir)) return res.status(404).json({ error: 'Thư mục không tồn tại' });
         const items = fs.readdirSync(targetDir, { withFileTypes: true });
-        res.json(items.map(item => ({
-            name: item.name,
-            isDirectory: item.isDirectory(),
-            type: item.isDirectory() ? 'folder' : 'file',
-            path: 'database/bim-vdc/' + path.join(subPath, item.name).replace(/\\/g, '/')
-        })));
+        res.json(items.map(item => {
+            const fullPath = path.join(targetDir, item.name);
+            let size = 0;
+            try {
+                if (!item.isDirectory()) {
+                    const stats = fs.statSync(fullPath);
+                    size = stats.size;
+                }
+            } catch (e) {
+                // Bỏ qua lỗi nếu file đang bị khóa hoặc không đọc được stat
+            }
+            return {
+                name: item.name,
+                isDirectory: item.isDirectory(),
+                type: item.isDirectory() ? 'folder' : 'file',
+                size: size,
+                path: 'database/bim-vdc/' + path.join(subPath, item.name).replace(/\\/g, '/')
+            };
+        }));
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1095,7 +1108,21 @@ app.get('/api/cde-files', (req, res) => {
             fs.readdirSync(dir, { withFileTypes: true }).forEach(file => {
                 const fullPath = path.join(dir, file.name);
                 const relPath = path.relative(BASE_DATABASE_DIR, fullPath).replace(/\\/g, '/');
-                fileList.push({ name: file.name, path: 'database/' + relPath, type: file.isDirectory() ? 'folder' : 'file' });
+                let size = 0;
+                try {
+                    if (!file.isDirectory()) {
+                        const stats = fs.statSync(fullPath);
+                        size = stats.size;
+                    }
+                } catch (e) {
+                    // Bỏ qua lỗi stat
+                }
+                fileList.push({ 
+                    name: file.name, 
+                    path: 'database/' + relPath, 
+                    type: file.isDirectory() ? 'folder' : 'file',
+                    size: size 
+                });
                 if (file.isDirectory()) walkDir(fullPath, fileList);
             });
             return fileList;
