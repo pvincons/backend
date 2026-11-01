@@ -799,7 +799,11 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
                     signingTime,
                     name: signerName,
                     reason: 'Ký số xác nhận tài liệu trên CDE PV INCONS',
-                    location: 'PV INCONS CDE'
+                    location: 'PV INCONS CDE',
+                    // Con dấu chữ ký hiển thị ở trang đầu. Tắt bằng SIGNATURE_STAMP=off; font tiếng Việt: SIGNATURE_FONT_PATH=...ttf
+                    stamp: process.env.SIGNATURE_STAMP === 'off'
+                        ? false
+                        : { serial: info.cert.serialNumber, fontPath: process.env.SIGNATURE_FONT_PATH }
                 });
             } catch (prepErr) {
                 return res.status(422).json({ success: false, error: 'Không thể chuẩn bị PDF để ký số: ' + prepErr.message });
