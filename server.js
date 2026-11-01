@@ -9,9 +9,8 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
-// Các thư viện xử lý nhúng chữ ký số PDF
-const { signPdf } = require('node-signpdf');
-const { PDFDocument } = require('pdf-lib');
+// Nhúng chữ ký số từ xa (VNPT SmartCA) vào PDF - xem smartca-pdf-sign.js
+const smartcaPdf = require('./smartca-pdf-sign');
 
 const app = express();
 
@@ -582,21 +581,41 @@ function canUserSignFile(user, relPath) {
     return canUserWriteReview(user, getContainerFromPath(relPath));
 }
 
-// Lưu giao dịch ký (tranId -> file, hash, người yêu cầu) để gettraninfo không phải tin filePath từ client
+// Lưu giao dịch ký (tranId -> file, hash, dữ liệu PDF đang chờ nhúng chữ ký, người yêu cầu)
+// để gettraninfo không phải tin dữ liệu từ client. PDF đã chuẩn bị vùng chữ ký nằm trong thư mục sign_pending.
 const SIGN_TX_FILE_PATH = path.join(BASE_DATABASE_DIR, 'sign_transactions.json');
+const SIGN_PENDING_DIR = path.join(BASE_DATABASE_DIR, 'sign_pending');
 const SIGN_TX_TTL_MS = 24 * 60 * 60 * 1000;
+if (!fs.existsSync(SIGN_PENDING_DIR)) fs.mkdirSync(SIGN_PENDING_DIR, { recursive: true });
+
 function readSignTx() {
     try { return fs.existsSync(SIGN_TX_FILE_PATH) ? JSON.parse(fs.readFileSync(SIGN_TX_FILE_PATH, 'utf8') || '{}') : {}; }
     catch (e) { return {}; }
+}
+function writeSignTx(db) {
+    const tmp = SIGN_TX_FILE_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+    fs.renameSync(tmp, SIGN_TX_FILE_PATH);
+}
+function removePendingFile(tx) {
+    try { if (tx && tx.pendingFile) fs.rmSync(path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile)), { force: true }); } catch (e) { }
 }
 function saveSignTx(tranId, info) {
     try {
         const db = readSignTx();
         const now = Date.now();
-        Object.keys(db).forEach(k => { if (now - (db[k].createdAt || 0) > SIGN_TX_TTL_MS) delete db[k]; });
+        Object.keys(db).forEach(k => {
+            if (now - (db[k].createdAt || 0) > SIGN_TX_TTL_MS) { removePendingFile(db[k]); delete db[k]; }
+        });
         db[tranId] = { ...info, createdAt: now };
-        fs.writeFileSync(SIGN_TX_FILE_PATH, JSON.stringify(db, null, 2), 'utf8');
+        writeSignTx(db);
     } catch (e) { console.error('Lỗi lưu giao dịch ký:', e); }
+}
+function updateSignTx(tranId, patch) {
+    try {
+        const db = readSignTx();
+        if (db[tranId]) { db[tranId] = { ...db[tranId], ...patch }; writeSignTx(db); }
+    } catch (e) { console.error('Lỗi cập nhật giao dịch ký:', e); }
 }
 
 function readSignaturesDB() {
@@ -610,18 +629,26 @@ function readSignaturesDB() {
     return {};
 }
 
-function saveVnptSignatureRecord(filePath, sigData, user) {
+// Ghi nhận MỘT lượt ký. Một tệp có thể có nhiều người ký nên lưu danh sách `signatures`;
+// signedBy / signedAt luôn là của lượt ký gần nhất (mir.html đang đọc 2 trường này để hiện huy hiệu "✓ Đã ký").
+function addSignatureRecord(filePath, entry) {
     try {
         const db = readSignaturesDB();
         const key = normRecallKey(filePath);
+        const old = db[key] || {};
+        const signatures = Array.isArray(old.signatures) ? old.signatures : [];
+        signatures.push(entry);
         db[key] = {
             filePath: key,
             fileName: path.basename(filePath),
-            signature: sigData,
-            signedBy: user ? (user.fullName || user.username) : 'Administrator',
-            signedAt: new Date().toISOString()
+            signatures,
+            signatureCount: signatures.length,
+            signedBy: entry.signedBy,
+            signedAt: entry.signedAt
         };
-        fs.writeFileSync(SIGNATURES_FILE_PATH, JSON.stringify(db, null, 2), 'utf8');
+        const tmp = SIGNATURES_FILE_PATH + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+        fs.renameSync(tmp, SIGNATURES_FILE_PATH);
     } catch (e) {
         console.error('Lỗi lưu bản ghi chữ ký VNPT:', e);
     }
@@ -719,17 +746,81 @@ app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
 });
 
 // 10.4. API Gửi yêu cầu ký Hash (SignHash) tới VNPT SmartCA
+//  - PDF  : tạo sẵn vùng chữ ký trong PDF (cập nhật tăng dần, giữ nguyên các chữ ký trước đó), dựng "signed attributes"
+//           PKCS#7 và gửi SHA-256 của chúng cho VNPT ký. Khi VNPT báo thành công, chữ ký được NHÚNG vào chính file PDF
+//           (xem finalizeVnptSignature). Phải băm đúng đối tượng này thì Adobe/pdfsig mới xác thực được chữ ký.
+//  - Khác : chỉ ký SHA-256 của tệp và ghi nhận trong signatures.json (không thể nhúng vào định dạng khác).
 app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
     try {
         const accessToken = req.body && req.body.access_token;
         if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const { credentialId, filePath, description } = req.body;
+        if (!credentialId) return res.status(400).json({ success: false, error: 'Thiếu credentialId (Chứng thư số) cần dùng để ký!' });
 
         const fileInfo = hashCdeFile(filePath);
         if (fileInfo.error) return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
 
         if (!canUserSignFile(req.authUser, fileInfo.relPath)) {
             return res.status(403).json({ success: false, error: 'Bạn không có quyền ký số tài liệu trong khu vực này của CDE!' });
+        }
+
+        const fullPath = path.resolve(ROOT_DIR, fileInfo.relPath);
+        const isPdf = /\.pdf$/i.test(fileInfo.fileName);
+        let hashToSign = fileInfo.hashBase64;
+        let txExtra = { mode: 'record', hashBase64: fileInfo.hashBase64 };
+        let preparedPdf = null;
+
+        if (isPdf) {
+            const pdfBuffer = fs.readFileSync(fullPath);
+
+            // 1) Lấy chuỗi chứng thư của người ký (đồng thời VNPT xác nhận credential thuộc tài khoản trong access_token)
+            const infoRes = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+                body: JSON.stringify({ credentialId, certificates: 'chain', certInfo: true, authInfo: false })
+            });
+            const infoData = await infoRes.json().catch(() => ({}));
+            const info = (infoData && infoData.content && infoData.content.cert) ? infoData.content : infoData;
+            if (!infoRes.ok || !info || !info.cert || !Array.isArray(info.cert.certificates) || !info.cert.certificates.length) {
+                return res.status(infoRes.ok ? 502 : infoRes.status).json({ success: false, error: (infoData && infoData.message) || 'Không lấy được chứng thư số của thuê bao từ VNPT SmartCA để nhúng vào PDF!' });
+            }
+            if (info.cert.status && info.cert.status !== 'VALID') {
+                return res.status(400).json({ success: false, error: `Chứng thư số không còn hiệu lực (trạng thái: ${info.cert.status}), không thể ký!` });
+            }
+            const chainDer = info.cert.certificates.map(smartcaPdf.b64ToDer);
+            const leafDer = smartcaPdf.pickLeafCert(chainDer, info.cert.serialNumber);
+            const signerName = smartcaPdf.certSubjectCN(leafDer) || req.authUser.fullName || req.authUser.username;
+
+            // 2) Chuẩn bị PDF có vùng chữ ký và dựng dữ liệu cần ký
+            const signingTime = new Date(Math.floor(Date.now() / 1000) * 1000);
+            let prep;
+            try {
+                prep = await smartcaPdf.preparePdf(pdfBuffer, {
+                    signingTime,
+                    name: signerName,
+                    reason: 'Ký số xác nhận tài liệu trên CDE PV INCONS',
+                    location: 'PV INCONS CDE'
+                });
+            } catch (prepErr) {
+                return res.status(422).json({ success: false, error: 'Không thể chuẩn bị PDF để ký số: ' + prepErr.message });
+            }
+            const attrs = smartcaPdf.buildSignedAttrs({ contentDigest: prep.digest, certDer: leafDer, signingTime });
+            hashToSign = smartcaPdf.sha256(attrs.toSign).toString('base64');
+            preparedPdf = prep.prepared;
+
+            txExtra = {
+                mode: 'pdf-embed',
+                hashBase64: smartcaPdf.sha256(pdfBuffer).toString('base64'), // hash tệp lúc yêu cầu: tệp đổi thì không nhúng
+                contentsStart: prep.contentsStart,
+                byteRange: prep.byteRange,
+                contentDigestB64: prep.digest.toString('base64'),
+                toSignB64: attrs.toSign.toString('base64'),
+                implicitB64: attrs.implicit.toString('base64'),
+                chainB64: chainDer.map(d => d.toString('base64')),
+                leafB64: leafDer.toString('base64'),
+                signerName,
+                certSerial: info.cert.serialNumber || ''
+            };
         }
 
         // notifyUrl do SERVER tạo (không nhận từ client), kèm token để xác thực callback từ VNPT
@@ -749,7 +840,7 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
                 datas: [
                     {
                         name: fileInfo.fileName,
-                        hash: fileInfo.hashBase64
+                        hash: hashToSign
                     }
                 ]
             })
@@ -761,17 +852,107 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
         if (data.code !== 0 || !data.content || !data.content.tranId) {
             return res.status(400).json({ success: false, error: data.message || data.codeDesc || 'VNPT SmartCA không tạo được giao dịch ký số' });
         }
+
+        // Giữ bản PDF đã có vùng chữ ký để nhúng đúng vào đó khi VNPT trả chữ ký về
+        let pendingFile = '';
+        if (preparedPdf) {
+            pendingFile = refTranId + '.pdf';
+            fs.writeFileSync(path.join(SIGN_PENDING_DIR, pendingFile), preparedPdf);
+        }
         saveSignTx(data.content.tranId, {
             filePath: fileInfo.relPath,
-            hashBase64: fileInfo.hashBase64,
-            username: req.authUser.username
+            username: req.authUser.username,
+            pendingFile,
+            ...txExtra
         });
 
-        res.json({ success: true, ...data, filePath, fileName: fileInfo.fileName });
+        res.json({ success: true, ...data, filePath, fileName: fileInfo.fileName, mode: txExtra.mode });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+// Hoàn tất giao dịch ký khi VNPT báo tranStatus = 1: kiểm tra chữ ký, đóng gói PKCS#7 và nhúng vào PDF.
+// Idempotent (frontend poll nhiều lần) và có khóa chống chạy song song cho cùng một giao dịch.
+const signFinalizing = new Set();
+async function finalizeVnptSignature(tranId, tx, content, user) {
+    if (tx.done) return { ok: true, already: true, embedded: !!tx.embedded };
+    if (signFinalizing.has(tranId)) {
+        return { ok: false, status: 409, retry: true, error: 'Hệ thống đang nhúng chữ ký vào tệp, vui lòng chờ giây lát...' };
+    }
+    signFinalizing.add(tranId);
+    try {
+        // Tệp phải còn nguyên như lúc yêu cầu ký (hash hiện tại trùng hash đã dùng để tạo vùng chữ ký)
+        const current = hashCdeFile(tx.filePath);
+        if (current.error || current.hashBase64 !== tx.hashBase64) {
+            return { ok: false, status: 409, error: 'Tệp tin đã bị thay đổi hoặc không còn tồn tại sau khi gửi yêu cầu ký, không thể ghi nhận chữ ký!' };
+        }
+
+        let embedded = false;
+        if (tx.mode === 'pdf-embed') {
+            const doc = content && Array.isArray(content.documents) ? content.documents[0] : null;
+            if (!doc || !doc.sig) {
+                return { ok: false, status: 502, error: 'VNPT SmartCA báo ký thành công nhưng không trả về chữ ký (documents[0].sig). Tệp chưa bị thay đổi, vui lòng liên hệ VNPT với mã giao dịch: ' + tranId };
+            }
+            const leafDer = Buffer.from(tx.leafB64, 'base64');
+            const toSign = Buffer.from(tx.toSignB64, 'base64');
+            const signature = smartcaPdf.decodeSignature(doc.sig, leafDer);
+            // Chặn nhúng chữ ký sai (khác dữ liệu đã gửi / khác chứng thư) để không làm hỏng tài liệu
+            if (!smartcaPdf.verifyRsaSignature(toSign, signature, leafDer)) {
+                return { ok: false, status: 502, error: 'Chữ ký VNPT trả về không khớp dữ liệu đã gửi ký hoặc chứng thư số của người ký. Đã dừng nhúng, tệp chưa bị thay đổi. Mã giao dịch: ' + tranId };
+            }
+
+            const pendingPath = path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile || ''));
+            if (!tx.pendingFile || !fs.existsSync(pendingPath)) {
+                return { ok: false, status: 410, error: 'Không còn bản PDF chờ nhúng chữ ký (có thể máy chủ đã khởi động lại hoặc quá hạn). Vui lòng ký lại.' };
+            }
+            const cms = smartcaPdf.buildCms({
+                chainDer: tx.chainB64.map(b => Buffer.from(b, 'base64')),
+                signerCertDer: leafDer,
+                implicitAttrs: Buffer.from(tx.implicitB64, 'base64'),
+                signature
+            });
+            const signedPdf = smartcaPdf.embedCms(fs.readFileSync(pendingPath), tx.contentsStart, cms);
+
+            // Soát lại: phần PDF được ký phải đúng bằng digest đã đưa vào signed attributes
+            const check = smartcaPdf.rangeDigest(signedPdf, tx.byteRange).toString('base64');
+            if (check !== tx.contentDigestB64) {
+                return { ok: false, status: 500, error: 'Kiểm tra sau nhúng không đạt (digest không khớp), tệp chưa bị thay đổi. Mã giao dịch: ' + tranId };
+            }
+
+            // Ghi nguyên tử: ghi file tạm rồi đổi tên đè lên tệp gốc
+            const tmpOut = path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile) + '.out');
+            fs.writeFileSync(tmpOut, signedPdf);
+            try {
+                fs.renameSync(tmpOut, path.resolve(ROOT_DIR, tx.filePath));
+            } catch (renameErr) {
+                // Khác ổ đĩa (EXDEV): sao chép rồi xóa tệp tạm
+                fs.copyFileSync(tmpOut, path.resolve(ROOT_DIR, tx.filePath));
+                fs.rmSync(tmpOut, { force: true });
+            }
+            embedded = true;
+            console.log(`[PV INCONS] Đã nhúng chữ ký số PKCS#7 vào PDF: ${tx.filePath} (giao dịch ${tranId})`);
+        }
+
+        addSignatureRecord(tx.filePath, {
+            tranId,
+            signedBy: user ? (user.fullName || user.username) : 'Administrator',
+            signerName: tx.signerName || '',
+            certSerial: tx.certSerial || '',
+            signedAt: new Date().toISOString(),
+            embedded,
+            mode: tx.mode
+        });
+        updateSignTx(tranId, { done: true, embedded });
+        removePendingFile(tx);
+        return { ok: true, embedded };
+    } catch (err) {
+        console.error('[PV INCONS] Lỗi hoàn tất ký số:', err);
+        return { ok: false, status: 500, error: 'Không thể nhúng chữ ký vào tệp: ' + err.message };
+    } finally {
+        signFinalizing.delete(tranId);
+    }
+}
 
 // 10.5. API Kiểm tra trạng thái giao dịch ký số (Get Transaction Info)
 app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) => {
@@ -808,98 +989,34 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
         }
 
         const tranStatus = data.content.tranStatus;
-        // CHỈ ghi nhận chữ ký khi giao dịch thành công (tranStatus = 1). 4000 là đang chờ người ký xác nhận.
+        let embedded = false;
+        // CHỈ ghi nhận / nhúng chữ ký khi giao dịch thành công (tranStatus = 1). 4000 là đang chờ người ký xác nhận.
         if (tranStatus === 1) {
-            // Đảm bảo file chưa bị thay đổi kể từ lúc yêu cầu ký (hash hiện tại phải trùng hash đã gửi VNPT)
-            const current = hashCdeFile(txInfo.filePath);
-            if (current.error || current.hashBase64 !== txInfo.hashBase64) {
-                return res.status(409).json({ success: false, error: 'Tệp tin đã bị thay đổi hoặc không còn tồn tại sau khi gửi yêu cầu ký, không thể ghi nhận chữ ký!' });
+            const result = await finalizeVnptSignature(tranId, txInfo, data.content, req.authUser);
+            if (!result.ok) {
+                return res.status(result.status || 500).json({ success: false, retry: !!result.retry, tranStatus, error: result.error });
             }
-
-            // Tiến hành nhúng chữ ký PKCS#7 từ VNPT SmartCA nếu có chuỗi chữ ký trả về
-            if (data.content.signatures && data.content.signatures.length > 0) {
-                const pkcs7Hex = data.content.signatures[0].signature || data.content.signatures[0];
-                if (pkcs7Hex && txInfo.filePath.toLowerCase().endsWith('.pdf')) {
-                    try {
-                        const cleanPath = String(txInfo.filePath).replace(/^database\/bim-vdc\/?/, '');
-                        const fullPath = path.resolve(ROOT_DIR, cleanPath);
-                        if (fs.existsSync(fullPath)) {
-                            const pdfBuffer = fs.readFileSync(fullPath);
-                            const signatureBuffer = Buffer.from(pkcs7Hex, 'hex');
-                            const signedPdfBuffer = signPdf(pdfBuffer, signatureBuffer);
-                            fs.writeFileSync(fullPath, signedPdfBuffer);
-                            console.log(`[PV INCONS] Đã nhúng chữ ký số PKCS#7 thành công vào file PDF: ${txInfo.filePath}`);
-                        }
-                    } catch (embedErr) {
-                        console.error('[PV INCONS] Lỗi nhúng chữ ký số PKCS#7 vào file PDF:', embedErr);
-                    }
-                }
-            }
-
-            saveVnptSignatureRecord(txInfo.filePath, data.content, req.authUser);
+            embedded = !!result.embedded;
         }
 
-        res.json({ success: true, ...data, tranStatus, tranStatusName: TRAN_STATUS[tranStatus] || 'UNKNOWN' });
+        // Không trả nguyên data.content (có thể chứa dữ liệu tệp base64) về trình duyệt
+        res.json({
+            success: true,
+            code: data.code,
+            codeDesc: data.codeDesc,
+            message: data.message,
+            content: { tranId, tranStatus, tranStatusDesc: data.content.tranStatusDesc },
+            tranStatus,
+            tranStatusName: TRAN_STATUS[tranStatus] || 'UNKNOWN',
+            embedded
+        });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// ===============================================================
-// 10.5.1 API XỬ LÝ NHÚNG CHỮ KÝ SỐ PKCS#7 VÀO FILE PDF TRỰC TIẾP (DÒNG 622 - 683)
-// ===============================================================
-app.post('/api/vnpt/signature/embed', requireCdeAuth, async (req, res) => {
-    try {
-        const { filePath, pkcs7Hex } = req.body;
-        // filePath: Đường dẫn tệp PDF trong kho CDE
-        // pkcs7Hex: Chuỗi chữ ký số PKCS#7 dạng Hex nhận từ kết quả xác thực giao dịch VNPT SmartCA
-
-        if (!filePath || !pkcs7Hex) {
-            return res.status(400).json({ success: false, error: "Thiếu đường dẫn file hoặc chuỗi chữ ký PKCS#7!" });
-        }
-
-        const cleanPath = String(filePath).replace(/^database\/bim-vdc\/?/, '');
-        const absolutePath = path.resolve(ROOT_DIR, cleanPath);
-
-        if (!fs.existsSync(absolutePath)) {
-            return res.status(404).json({ success: false, error: "Không tìm thấy file PDF trên server CDE." });
-        }
-
-        if (!canUserSignFile(req.authUser, cleanPath)) {
-            return res.status(403).json({ success: false, error: "Bạn không có quyền ký số tài liệu trong khu vực này của CDE!" });
-        }
-
-        // 1. Đọc nội dung file PDF gốc
-        const pdfBuffer = fs.readFileSync(absolutePath);
-
-        // 2. Chuyển đổi chuỗi chữ ký PKCS#7 từ dạng Hex sang Buffer
-        const signatureBuffer = Buffer.from(pkcs7Hex, 'hex');
-
-        // 3. Tiến hành nhúng chữ ký số vào PDF bằng thư viện node-signpdf
-        // (Thư viện tự động điền chuỗi chữ ký vào khoảng trống ByteRange /Contents đã được chuẩn bị sẵn)
-        const signedPdfBuffer = signPdf(pdfBuffer, signatureBuffer);
-
-        // 4. Ghi đè file PDF đã được đóng gói mã ký số hoàn chỉnh vào ổ đĩa server
-        fs.writeFileSync(absolutePath, signedPdfBuffer);
-
-        // 5. Lưu thông tin lịch sử chữ ký vào database signatures.json để giao diện mir.html hiển thị huy hiệu "✓ Đã ký"
-        saveVnptSignatureRecord(filePath, { pkcs7Hex, embedded: true }, req.authUser);
-
-        console.log(`[PV INCONS SERVER] Đã nhúng chữ ký số PKCS#7 thành công vào: ${filePath}`);
-
-        res.json({
-            success: true,
-            message: "Nhúng chữ ký số PKCS#7 vào file PDF thành công!",
-            filePath: filePath,
-            signedBy: req.authUser.fullName || req.authUser.username,
-            signedAt: new Date().toISOString()
-        });
-
-    } catch (err) {
-        console.error("Lỗi nhúng chữ ký PDF:", err);
-        res.status(500).json({ success: false, error: "Không thể nhúng chữ ký vào PDF: " + err.message });
-    }
-});
+// (Đã gỡ API /api/vnpt/signature/embed: cho phép người dùng tự gửi chuỗi PKCS#7 bất kỳ để ghi vào PDF
+//  trên server, không kiểm chứng được và không tạo ra chữ ký hợp lệ. Việc nhúng nay do finalizeVnptSignature đảm nhiệm.)
 
 // 10.6. API NHẬN THÔNG BÁO (notifyUrl) TỪ VNPT SMARTCA - server to server, HTTP POST JSON {tranId, refTranId, status}
 // Xác thực bằng SMARTCA_WEBHOOK_TOKEN gắn trong notifyUrl. Chỉ GHI NHẬN thông báo; việc lưu chữ ký vẫn do
