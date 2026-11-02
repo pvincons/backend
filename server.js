@@ -146,7 +146,10 @@ app.post('/api/auth/login', (req, res) => {
             groups: user.groups || []
         };
 
-        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '12h' });
+        const token = jwt.sign(tokenPayload, JWT_SECRET, {
+            expiresIn: '12h',
+            jwtid: crypto.randomBytes(16).toString('hex')
+        });
 
         res.json({
             success: true,
@@ -545,6 +548,132 @@ app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
 const VNPT_SMARTCA_BASE_URL = process.env.VNPT_SMARTCA_BASE_URL.replace(/\/+$/, '');
 const VNPT_SMARTCA_CLIENT_ID = process.env.VNPT_SMARTCA_CLIENT_ID;
 const VNPT_SMARTCA_CLIENT_SECRET = process.env.VNPT_SMARTCA_CLIENT_SECRET;
+const VNPT_AUTH_SESSIONS = new Map();
+const VNPT_SESSION_REFRESHES = new Map();
+
+function getCdeSessionKey(req) {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!token) throw new Error('Không xác định được phiên đăng nhập CDE.');
+    return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function storeVnptAuthSession(req, tokenData, credentialIds) {
+    const sessionKey = getCdeSessionKey(req);
+    const cdePayload = jwt.decode((req.headers.authorization || '').slice(7).trim());
+    const expiresAt = cdePayload && cdePayload.exp
+        ? cdePayload.exp * 1000
+        : Date.now() + 12 * 60 * 60 * 1000;
+    for (const [key, session] of VNPT_AUTH_SESSIONS) {
+        if (session.expiresAt <= Date.now()) VNPT_AUTH_SESSIONS.delete(key);
+    }
+    VNPT_AUTH_SESSIONS.set(sessionKey, {
+        username: req.authUser.username,
+        credentialIds,
+        expiresAt,
+        credentialsEncrypted: encryptSignCredentials({
+            accessToken: tokenData.access_token,
+            refreshToken: tokenData.refresh_token || '',
+            expiresAt: Number(tokenData.expires_in) > 0
+                ? Date.now() + Number(tokenData.expires_in) * 1000
+                : 0
+        })
+    });
+}
+
+async function getVnptAuthSession(req, forceRefresh = false) {
+    const sessionKey = getCdeSessionKey(req);
+    let session = VNPT_AUTH_SESSIONS.get(sessionKey);
+    if (!session || session.username !== req.authUser.username || session.expiresAt <= Date.now()) {
+        VNPT_AUTH_SESSIONS.delete(sessionKey);
+        const error = new Error('Chưa có phiên VNPT SmartCA. Vui lòng xác thực tài khoản để tiếp tục.');
+        error.status = 401;
+        throw error;
+    }
+
+    let credentials = decryptSignCredentials(session.credentialsEncrypted);
+    if (credentials.refreshToken && (forceRefresh || (credentials.expiresAt && credentials.expiresAt <= Date.now() + 30000))) {
+        let refreshTask = VNPT_SESSION_REFRESHES.get(sessionKey);
+        if (!refreshTask) {
+            const previousCredentials = credentials;
+            refreshTask = (async () => {
+                const params = new URLSearchParams({
+                    grant_type: 'refresh_token',
+                    client_id: VNPT_SMARTCA_CLIENT_ID,
+                    client_secret: VNPT_SMARTCA_CLIENT_SECRET,
+                    refresh_token: previousCredentials.refreshToken,
+                    scope: 'sign offline_access openid profile email'
+                });
+                const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/auth/token`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: params
+                });
+                const refreshed = await response.json().catch(() => ({}));
+                if (!response.ok || !refreshed.access_token) {
+                    throw new Error(refreshed.error_description || refreshed.error || 'Không thể làm mới phiên VNPT SmartCA. Vui lòng xác thực lại tài khoản.');
+                }
+                const latestSession = VNPT_AUTH_SESSIONS.get(sessionKey);
+                if (!latestSession || latestSession.expiresAt <= Date.now()) {
+                    throw new Error('Phiên đăng nhập CDE đã hết hạn. Vui lòng đăng nhập lại.');
+                }
+                const latestCredentials = decryptSignCredentials(latestSession.credentialsEncrypted);
+                if (latestCredentials.refreshToken === previousCredentials.refreshToken) {
+                    latestSession.credentialsEncrypted = encryptSignCredentials({
+                        accessToken: refreshed.access_token,
+                        refreshToken: refreshed.refresh_token || previousCredentials.refreshToken,
+                        expiresAt: Number(refreshed.expires_in) > 0
+                            ? Date.now() + Number(refreshed.expires_in) * 1000
+                            : 0
+                    });
+                }
+            })();
+            VNPT_SESSION_REFRESHES.set(sessionKey, refreshTask);
+        }
+        try {
+            await refreshTask;
+        } finally {
+            if (VNPT_SESSION_REFRESHES.get(sessionKey) === refreshTask) {
+                VNPT_SESSION_REFRESHES.delete(sessionKey);
+            }
+        }
+        session = VNPT_AUTH_SESSIONS.get(sessionKey);
+        if (!session || session.expiresAt <= Date.now()) {
+            throw new Error('Phiên đăng nhập CDE đã hết hạn. Vui lòng đăng nhập lại.');
+        }
+        credentials = decryptSignCredentials(session.credentialsEncrypted);
+    }
+
+    return { ...credentials, credentialIds: session.credentialIds, sessionKey };
+}
+
+async function requestVnptWithSession(req, endpoint, body) {
+    let session = await getVnptAuthSession(req);
+    let response = await fetch(`${VNPT_SMARTCA_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.accessToken}` },
+        body: JSON.stringify(body)
+    });
+    if (response.status === 401 || response.status === 403) {
+        session = await getVnptAuthSession(req, true);
+        response = await fetch(`${VNPT_SMARTCA_BASE_URL}${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.accessToken}` },
+            body: JSON.stringify(body)
+        });
+    }
+    return { response, session };
+}
+
+function syncVnptSessionFromTransaction(tx, previousCredentials, refreshedCredentials) {
+    if (!tx.vnptSessionKey) return;
+    const session = VNPT_AUTH_SESSIONS.get(tx.vnptSessionKey);
+    if (!session || session.expiresAt <= Date.now()) return;
+    const sessionCredentials = decryptSignCredentials(session.credentialsEncrypted);
+    if (sessionCredentials.refreshToken === previousCredentials.refreshToken) {
+        session.credentialsEncrypted = encryptSignCredentials(refreshedCredentials);
+    }
+}
 
 const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
 
@@ -587,71 +716,101 @@ function canUserSignFile(user, relPath) {
 const SIGN_TX_FILE_PATH = path.join(BASE_DATABASE_DIR, 'sign_transactions.json');
 const SIGN_PENDING_DIR = path.join(BASE_DATABASE_DIR, 'sign_pending');
 const SIGN_TX_TTL_MS = 24 * 60 * 60 * 1000;
+const SIGN_TX_ENCRYPTION_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 if (!fs.existsSync(SIGN_PENDING_DIR)) fs.mkdirSync(SIGN_PENDING_DIR, { recursive: true });
 
 function readSignTx() {
-    try { return fs.existsSync(SIGN_TX_FILE_PATH) ? JSON.parse(fs.readFileSync(SIGN_TX_FILE_PATH, 'utf8') || '{}') : {}; }
-    catch (e) { return {}; }
+    if (!fs.existsSync(SIGN_TX_FILE_PATH)) return {};
+    return JSON.parse(fs.readFileSync(SIGN_TX_FILE_PATH, 'utf8') || '{}');
+}
+function encryptSignCredentials(credentials) {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', SIGN_TX_ENCRYPTION_KEY, iv);
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(credentials), 'utf8'), cipher.final()]);
+    return {
+        iv: iv.toString('base64'),
+        tag: cipher.getAuthTag().toString('base64'),
+        data: encrypted.toString('base64')
+    };
+}
+function decryptSignCredentials(encrypted) {
+    if (!encrypted || !encrypted.iv || !encrypted.tag || !encrypted.data) {
+        throw new Error('Giao dịch không có thông tin xác thực VNPT đã mã hóa.');
+    }
+    const decipher = crypto.createDecipheriv('aes-256-gcm', SIGN_TX_ENCRYPTION_KEY, Buffer.from(encrypted.iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(encrypted.tag, 'base64'));
+    return JSON.parse(Buffer.concat([
+        decipher.update(Buffer.from(encrypted.data, 'base64')),
+        decipher.final()
+    ]).toString('utf8'));
 }
 function writeSignTx(db) {
-    const tmp = SIGN_TX_FILE_PATH + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
-    fs.renameSync(tmp, SIGN_TX_FILE_PATH);
+    const tmp = `${SIGN_TX_FILE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+        fs.renameSync(tmp, SIGN_TX_FILE_PATH);
+    } catch (error) {
+        try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+        throw error;
+    }
 }
 function removePendingFile(tx) {
-    try { if (tx && tx.pendingFile) fs.rmSync(path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile)), { force: true }); } catch (e) { }
+    if (!tx) return;
+    for (const fileName of [tx.pendingFile, tx.finalOutput]) {
+        if (!fileName) continue;
+        try { fs.rmSync(path.join(SIGN_PENDING_DIR, path.basename(fileName)), { force: true }); } catch (e) { }
+    }
 }
 function saveSignTx(tranId, info) {
-    try {
-        const db = readSignTx();
-        const now = Date.now();
-        Object.keys(db).forEach(k => {
-            if (now - (db[k].createdAt || 0) > SIGN_TX_TTL_MS) { removePendingFile(db[k]); delete db[k]; }
-        });
-        db[tranId] = { ...info, createdAt: now };
-        writeSignTx(db);
-    } catch (e) { console.error('Lỗi lưu giao dịch ký:', e); }
+    if (!tranId) throw new Error('Thiếu mã giao dịch VNPT.');
+    const db = readSignTx();
+    if (db[tranId]) throw new Error(`Mã giao dịch VNPT ${tranId} đã tồn tại.`);
+    const now = Date.now();
+    Object.keys(db).forEach(k => {
+        if (now - (db[k].createdAt || 0) > SIGN_TX_TTL_MS) { removePendingFile(db[k]); delete db[k]; }
+    });
+    db[tranId] = { ...info, createdAt: now };
+    writeSignTx(db);
 }
 function updateSignTx(tranId, patch) {
-    try {
-        const db = readSignTx();
-        if (db[tranId]) { db[tranId] = { ...db[tranId], ...patch }; writeSignTx(db); }
-    } catch (e) { console.error('Lỗi cập nhật giao dịch ký:', e); }
+    const db = readSignTx();
+    if (!db[tranId]) throw new Error(`Không tìm thấy giao dịch ký ${tranId} để cập nhật.`);
+    db[tranId] = { ...db[tranId], ...patch };
+    writeSignTx(db);
+    return db[tranId];
 }
 
 function readSignaturesDB() {
-    try {
-        if (fs.existsSync(SIGNATURES_FILE_PATH)) {
-            return JSON.parse(fs.readFileSync(SIGNATURES_FILE_PATH, 'utf8') || '{}');
-        }
-    } catch (e) {
-        console.error('Lỗi đọc signatures.json:', e);
-    }
-    return {};
+    if (!fs.existsSync(SIGNATURES_FILE_PATH)) return {};
+    return JSON.parse(fs.readFileSync(SIGNATURES_FILE_PATH, 'utf8') || '{}');
 }
 
 // Ghi nhận MỘT lượt ký. Một tệp có thể có nhiều người ký nên lưu danh sách `signatures`;
 // signedBy / signedAt luôn là của lượt ký gần nhất (mir.html đang đọc 2 trường này để hiện huy hiệu "✓ Đã ký").
 function addSignatureRecord(filePath, entry) {
-    try {
-        const db = readSignaturesDB();
-        const key = normRecallKey(filePath);
-        const old = db[key] || {};
-        const signatures = Array.isArray(old.signatures) ? old.signatures : [];
+    const db = readSignaturesDB();
+    const key = normRecallKey(filePath);
+    const old = db[key] || {};
+    const signatures = Array.isArray(old.signatures) ? old.signatures : [];
+    if (!signatures.some(signature => signature.tranId === entry.tranId)) {
         signatures.push(entry);
-        db[key] = {
-            filePath: key,
-            fileName: path.basename(filePath),
-            signatures,
-            signatureCount: signatures.length,
-            signedBy: entry.signedBy,
-            signedAt: entry.signedAt
-        };
-        const tmp = SIGNATURES_FILE_PATH + '.tmp';
+    }
+    const latestSignature = signatures[signatures.length - 1];
+    db[key] = {
+        filePath: key,
+        fileName: path.basename(filePath),
+        signatures,
+        signatureCount: signatures.length,
+        signedBy: latestSignature.signedBy,
+        signedAt: latestSignature.signedAt
+    };
+    const tmp = `${SIGNATURES_FILE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
         fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
         fs.renameSync(tmp, SIGNATURES_FILE_PATH);
     } catch (e) {
-        console.error('Lỗi lưu bản ghi chữ ký VNPT:', e);
+        try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+        throw e;
     }
 }
 
@@ -679,12 +838,15 @@ function requireCdeAuth(req, res, next) {
 app.post('/api/vnpt/token', requireCdeAuth, async (req, res) => {
     try {
         const { username, password } = req.body;
+        if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password) {
+            return res.status(400).json({ success: false, error: 'Vui lòng nhập đầy đủ tài khoản và mật khẩu VNPT SmartCA.' });
+        }
         const params = new URLSearchParams();
-        params.append('grant_type', password ? 'password' : 'client_credentials');
+        params.append('grant_type', 'password');
         params.append('client_id', VNPT_SMARTCA_CLIENT_ID);
         params.append('client_secret', VNPT_SMARTCA_CLIENT_SECRET);
-        if (username) params.append('username', username);
-        if (password) params.append('password', password);
+        params.append('username', username.trim());
+        params.append('password', password);
         params.append('scope', 'sign offline_access openid profile email');
 
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/auth/token`, {
@@ -697,7 +859,27 @@ app.post('/api/vnpt/token', requireCdeAuth, async (req, res) => {
         if (!response.ok) {
             return res.status(response.status).json({ success: false, error: data.error_description || data.error || 'Lỗi xác thực VNPT SmartCA Token' });
         }
-        res.json({ success: true, ...data });
+        if (!data.access_token) {
+            return res.status(502).json({ success: false, error: 'VNPT không trả về access token.' });
+        }
+        const credentialResponse = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/list`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${data.access_token}` },
+            body: JSON.stringify({})
+        });
+        const credentialData = await credentialResponse.json().catch(() => ({}));
+        if (!credentialResponse.ok || credentialData.code !== 0) {
+            return res.status(credentialResponse.status || 502).json({
+                success: false,
+                error: credentialData.message || credentialData.error_description || 'Không lấy được danh sách chứng thư số VNPT.'
+            });
+        }
+        const credentialIds = Array.isArray(credentialData.content) ? credentialData.content : [];
+        if (credentialIds.length === 0) {
+            return res.status(400).json({ success: false, error: 'Tài khoản VNPT chưa được cấp chứng thư số hoạt động.' });
+        }
+        storeVnptAuthSession(req, data, credentialIds);
+        res.json({ success: true, content: credentialIds });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -706,8 +888,8 @@ app.post('/api/vnpt/token', requireCdeAuth, async (req, res) => {
 // 10.2. API Lấy danh sách Chứng thư số (List credential)
 app.post('/api/vnpt/credentials/list', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.body && req.body.access_token;
-        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
+        const session = await getVnptAuthSession(req);
+        const accessToken = session.accessToken;
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/list`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
@@ -717,6 +899,26 @@ app.post('/api/vnpt/credentials/list', requireCdeAuth, async (req, res) => {
         if (!response.ok) return res.status(response.status).json({ success: false, error: data.message || 'Lỗi lấy danh sách CTS VNPT' });
         res.json({ success: true, ...data });
     } catch (error) {
+        res.status(error.status || 500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/vnpt/session', requireCdeAuth, async (req, res) => {
+    try {
+        const session = await getVnptAuthSession(req);
+        res.json({ success: true, content: session.credentialIds });
+    } catch (error) {
+        res.status(error.status || 500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/vnpt/session/logout', requireCdeAuth, (req, res) => {
+    try {
+        const sessionKey = getCdeSessionKey(req);
+        VNPT_AUTH_SESSIONS.delete(sessionKey);
+        VNPT_SESSION_REFRESHES.delete(sessionKey);
+        res.json({ success: true });
+    } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -724,8 +926,8 @@ app.post('/api/vnpt/credentials/list', requireCdeAuth, async (req, res) => {
 // 10.3. API Lấy thông tin chi tiết Chứng thư số (Credential Info)
 app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.body && req.body.access_token;
-        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
+        const session = await getVnptAuthSession(req);
+        const accessToken = session.accessToken;
         const { credentialId, certificates, certInfo, authInfo } = req.body;
 
         const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
@@ -742,7 +944,7 @@ app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
         if (!response.ok) return res.status(response.status).json({ success: false, error: data.message || 'Lỗi lấy thông tin CTS' });
         res.json({ success: true, ...data });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        res.status(error.status || 500).json({ success: false, error: error.message });
     }
 });
 
@@ -753,10 +955,13 @@ app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
 //  - Khác : chỉ ký SHA-256 của tệp và ghi nhận trong signatures.json (không thể nhúng vào định dạng khác).
 app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
     try {
-        const accessToken = req.body && req.body.access_token;
-        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const { credentialId, filePath, description } = req.body;
         if (!credentialId) return res.status(400).json({ success: false, error: 'Thiếu credentialId (Chứng thư số) cần dùng để ký!' });
+        const vnptSession = await getVnptAuthSession(req);
+        if (!vnptSession.credentialIds.includes(credentialId)) {
+            return res.status(403).json({ success: false, error: 'Chứng thư số không thuộc phiên VNPT SmartCA đang hoạt động.' });
+        }
+        let accessToken = vnptSession.accessToken;
 
         const fileInfo = hashCdeFile(filePath);
         if (fileInfo.error) return res.status(fileInfo.status).json({ success: false, error: fileInfo.error });
@@ -775,11 +980,22 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             const pdfBuffer = fs.readFileSync(fullPath);
 
             // 1) Lấy chuỗi chứng thư của người ký (đồng thời VNPT xác nhận credential thuộc tài khoản trong access_token)
-            const infoRes = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
+            let infoRes = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
                 body: JSON.stringify({ credentialId, certificates: 'chain', certInfo: true, authInfo: false })
             });
+            if (infoRes.status === 401 || infoRes.status === 403) {
+                const refreshedSession = await getVnptAuthSession(req, true);
+                accessToken = refreshedSession.accessToken;
+                vnptSession.refreshToken = refreshedSession.refreshToken;
+                vnptSession.expiresAt = refreshedSession.expiresAt;
+                infoRes = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/info`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+                    body: JSON.stringify({ credentialId, certificates: 'chain', certInfo: true, authInfo: false })
+                });
+            }
             const infoData = await infoRes.json().catch(() => ({}));
             const info = (infoData && infoData.content && infoData.content.cert) ? infoData.content : infoData;
             if (!infoRes.ok || !info || !info.cert || !Array.isArray(info.cert.certificates) || !info.cert.certificates.length) {
@@ -833,8 +1049,8 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             ? `${String(process.env.PUBLIC_API_BASE_URL || '').replace(/\/+$/, '')}/api/smartca/callback?token=${encodeURIComponent(process.env.SMARTCA_WEBHOOK_TOKEN)}`
             : '';
 
-        const refTranId = 'PVI-' + Date.now();
-        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/signature/signhash`, {
+        const refTranId = `PVI-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        let response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/signature/signhash`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
             body: JSON.stringify({
@@ -851,6 +1067,23 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             })
         });
 
+        if (response.status === 401 || response.status === 403) {
+            const refreshedSession = await getVnptAuthSession(req, true);
+            accessToken = refreshedSession.accessToken;
+            vnptSession.refreshToken = refreshedSession.refreshToken;
+            vnptSession.expiresAt = refreshedSession.expiresAt;
+            response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/signature/signhash`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+                body: JSON.stringify({
+                    credentialId,
+                    refTranId,
+                    ...(notifyUrl && process.env.PUBLIC_API_BASE_URL ? { notifyUrl } : {}),
+                    description: description || 'Ký số tài liệu CDE PV Incons qua VNPT SmartCA',
+                    datas: [{ name: fileInfo.fileName, hash: hashToSign }]
+                })
+            });
+        }
         const data = await response.json();
         if (!response.ok) return res.status(response.status).json({ success: false, error: data.message || 'Lỗi yêu cầu ký SignHash VNPT' });
 
@@ -864,13 +1097,32 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             pendingFile = refTranId + '.pdf';
             fs.writeFileSync(path.join(SIGN_PENDING_DIR, pendingFile), preparedPdf);
         }
-        saveSignTx(data.content.tranId, {
-            filePath: fileInfo.relPath,
-            username: req.authUser.username,
-            pendingFile,
-            ...txExtra
-        });
+        try {
+            saveSignTx(data.content.tranId, {
+                filePath: fileInfo.relPath,
+                username: req.authUser.username,
+                signedBy: req.authUser.fullName || req.authUser.username,
+                refTranId,
+                pendingFile,
+                credentialsEncrypted: encryptSignCredentials({
+                    accessToken,
+                    refreshToken: vnptSession.refreshToken,
+                    expiresAt: vnptSession.expiresAt
+                }),
+                vnptSessionKey: vnptSession.sessionKey,
+                ...txExtra
+            });
+        } catch (error) {
+            removePendingFile({ pendingFile });
+            console.error(`[PV INCONS] Không lưu được giao dịch VNPT ${data.content.tranId}:`, error);
+            return res.status(500).json({
+                success: false,
+                tranId: data.content.tranId,
+                error: `VNPT đã tạo giao dịch ${data.content.tranId} nhưng CDE không lưu được trạng thái giao dịch. Không gửi lại yêu cầu ký để tránh tạo giao dịch trùng; vui lòng báo quản trị viên.`
+            });
+        }
 
+        scheduleSignTxReconciliation(data.content.tranId);
         res.json({ success: true, ...data, filePath, fileName: fileInfo.fileName, mode: txExtra.mode });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -878,7 +1130,7 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
 });
 
 // Hoàn tất giao dịch ký khi VNPT báo tranStatus = 1: kiểm tra chữ ký, đóng gói PKCS#7 và nhúng vào PDF.
-// Idempotent (frontend poll nhiều lần) và có khóa chống chạy song song cho cùng một giao dịch.
+// Idempotent (frontend poll, callback và worker có thể cùng kiểm tra).
 const signFinalizing = new Set();
 async function finalizeVnptSignature(tranId, tx, content, user) {
     if (tx.done) return { ok: true, already: true, embedded: !!tx.embedded };
@@ -887,56 +1139,77 @@ async function finalizeVnptSignature(tranId, tx, content, user) {
     }
     signFinalizing.add(tranId);
     try {
-        // Tệp phải còn nguyên như lúc yêu cầu ký (hash hiện tại trùng hash đã dùng để tạo vùng chữ ký)
-        const current = hashCdeFile(tx.filePath);
-        if (current.error || current.hashBase64 !== tx.hashBase64) {
-            return { ok: false, status: 409, error: 'Tệp tin đã bị thay đổi hoặc không còn tồn tại sau khi gửi yêu cầu ký, không thể ghi nhận chữ ký!' };
+        const finalOutput = tx.finalOutput || (tx.pendingFile ? `${path.basename(tx.pendingFile)}.signed` : '');
+        const stagedOutputPath = finalOutput
+            ? path.join(SIGN_PENDING_DIR, path.basename(finalOutput))
+            : '';
+        const stagedOutputExists = !!tx.finalizing && !!stagedOutputPath && fs.existsSync(stagedOutputPath);
+        let embedded = !!tx.fileEmbedded;
+
+        if (!tx.fileEmbedded && !stagedOutputExists) {
+            const current = hashCdeFile(tx.filePath);
+            if (current.error || current.hashBase64 !== tx.hashBase64) {
+                return { ok: false, status: 409, error: 'Tệp tin đã bị thay đổi hoặc không còn tồn tại sau khi gửi yêu cầu ký, không thể ghi nhận chữ ký!' };
+            }
         }
 
-        let embedded = false;
         if (tx.mode === 'pdf-embed') {
-            const doc = content && Array.isArray(content.documents) ? content.documents[0] : null;
-            if (!doc || !doc.sig) {
-                return { ok: false, status: 502, error: 'VNPT SmartCA báo ký thành công nhưng không trả về chữ ký (documents[0].sig). Tệp chưa bị thay đổi, vui lòng liên hệ VNPT với mã giao dịch: ' + tranId };
-            }
-            const leafDer = Buffer.from(tx.leafB64, 'base64');
-            const toSign = Buffer.from(tx.toSignB64, 'base64');
-            const signature = smartcaPdf.decodeSignature(doc.sig, leafDer);
-            // Chặn nhúng chữ ký sai (khác dữ liệu đã gửi / khác chứng thư) để không làm hỏng tài liệu
-            if (!smartcaPdf.verifyRsaSignature(toSign, signature, leafDer)) {
-                return { ok: false, status: 502, error: 'Chữ ký VNPT trả về không khớp dữ liệu đã gửi ký hoặc chứng thư số của người ký. Đã dừng nhúng, tệp chưa bị thay đổi. Mã giao dịch: ' + tranId };
-            }
+            if (!tx.fileEmbedded) {
+                if (!stagedOutputExists) {
+                    const doc = content && Array.isArray(content.documents) ? content.documents[0] : null;
+                    if (!doc || !doc.sig) {
+                        return { ok: false, status: 502, error: 'VNPT SmartCA báo ký thành công nhưng không trả về chữ ký (documents[0].sig). Tệp chưa bị thay đổi, vui lòng liên hệ VNPT với mã giao dịch: ' + tranId };
+                    }
+                    const leafDer = Buffer.from(tx.leafB64, 'base64');
+                    const toSign = Buffer.from(tx.toSignB64, 'base64');
+                    const signature = smartcaPdf.decodeSignature(doc.sig, leafDer);
+                    if (!smartcaPdf.verifyRsaSignature(toSign, signature, leafDer)) {
+                        return { ok: false, status: 502, error: 'Chữ ký VNPT trả về không khớp dữ liệu đã gửi ký hoặc chứng thư số của người ký. Đã dừng nhúng, tệp chưa bị thay đổi. Mã giao dịch: ' + tranId };
+                    }
 
-            const pendingPath = path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile || ''));
-            if (!tx.pendingFile || !fs.existsSync(pendingPath)) {
-                return { ok: false, status: 410, error: 'Không còn bản PDF chờ nhúng chữ ký (có thể máy chủ đã khởi động lại hoặc quá hạn). Vui lòng ký lại.' };
-            }
-            const cms = smartcaPdf.buildCms({
-                chainDer: tx.chainB64.map(b => Buffer.from(b, 'base64')),
-                signerCertDer: leafDer,
-                implicitAttrs: Buffer.from(tx.implicitB64, 'base64'),
-                signature
-            });
-            const signedPdf = smartcaPdf.embedCms(fs.readFileSync(pendingPath), tx.contentsStart, cms);
+                    const pendingPath = path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile || ''));
+                    if (!tx.pendingFile || !fs.existsSync(pendingPath)) {
+                        return { ok: false, status: 410, error: 'Không còn bản PDF chờ nhúng chữ ký. Vui lòng ký lại.' };
+                    }
+                    const cms = smartcaPdf.buildCms({
+                        chainDer: tx.chainB64.map(b => Buffer.from(b, 'base64')),
+                        signerCertDer: leafDer,
+                        implicitAttrs: Buffer.from(tx.implicitB64, 'base64'),
+                        signature
+                    });
+                    const signedPdf = smartcaPdf.embedCms(fs.readFileSync(pendingPath), tx.contentsStart, cms);
+                    const check = smartcaPdf.rangeDigest(signedPdf, tx.byteRange).toString('base64');
+                    if (check !== tx.contentDigestB64) {
+                        return { ok: false, status: 500, error: 'Kiểm tra sau nhúng không đạt (digest không khớp), tệp chưa bị thay đổi. Mã giao dịch: ' + tranId };
+                    }
 
-            // Soát lại: phần PDF được ký phải đúng bằng digest đã đưa vào signed attributes
-            const check = smartcaPdf.rangeDigest(signedPdf, tx.byteRange).toString('base64');
-            if (check !== tx.contentDigestB64) {
-                return { ok: false, status: 500, error: 'Kiểm tra sau nhúng không đạt (digest không khớp), tệp chưa bị thay đổi. Mã giao dịch: ' + tranId };
-            }
+                    fs.writeFileSync(stagedOutputPath, signedPdf);
+                    tx = updateSignTx(tranId, {
+                        finalizing: true,
+                        finalOutput,
+                        signedAt: tx.signedAt || new Date().toISOString()
+                    });
+                }
 
-            // Ghi nguyên tử: ghi file tạm rồi đổi tên đè lên tệp gốc
-            const tmpOut = path.join(SIGN_PENDING_DIR, path.basename(tx.pendingFile) + '.out');
-            fs.writeFileSync(tmpOut, signedPdf);
-            try {
-                fs.renameSync(tmpOut, path.resolve(ROOT_DIR, tx.filePath));
-            } catch (renameErr) {
-                // Khác ổ đĩa (EXDEV): sao chép rồi xóa tệp tạm
-                fs.copyFileSync(tmpOut, path.resolve(ROOT_DIR, tx.filePath));
-                fs.rmSync(tmpOut, { force: true });
+                if (!tx.fileEmbedded) {
+                    const targetPath = path.resolve(ROOT_DIR, tx.filePath);
+                    const rootPath = path.resolve(ROOT_DIR);
+                    if (!targetPath.startsWith(rootPath + path.sep)) {
+                        return { ok: false, status: 400, error: 'Đường dẫn đích của tệp ký không hợp lệ.' };
+                    }
+                    const targetTempPath = `${targetPath}.sign-${crypto.randomBytes(6).toString('hex')}.tmp`;
+                    fs.copyFileSync(stagedOutputPath, targetTempPath);
+                    try {
+                        fs.renameSync(targetTempPath, targetPath);
+                    } catch (renameError) {
+                        fs.copyFileSync(targetTempPath, targetPath);
+                        fs.rmSync(targetTempPath, { force: true });
+                    }
+                    tx = updateSignTx(tranId, { fileEmbedded: true, embedded: true });
+                    embedded = true;
+                    console.log(`[PV INCONS] Đã nhúng chữ ký số PKCS#7 vào PDF: ${tx.filePath} (giao dịch ${tranId})`);
+                }
             }
-            embedded = true;
-            console.log(`[PV INCONS] Đã nhúng chữ ký số PKCS#7 vào PDF: ${tx.filePath} (giao dịch ${tranId})`);
         }
 
         addSignatureRecord(tx.filePath, {
@@ -944,12 +1217,13 @@ async function finalizeVnptSignature(tranId, tx, content, user) {
             signedBy: user ? (user.fullName || user.username) : 'Administrator',
             signerName: tx.signerName || '',
             certSerial: tx.certSerial || '',
-            signedAt: new Date().toISOString(),
+            signedAt: tx.signedAt || new Date().toISOString(),
             embedded,
             mode: tx.mode
         });
-        updateSignTx(tranId, { done: true, embedded });
+        updateSignTx(tranId, { done: true, embedded, completedAt: Date.now() });
         removePendingFile(tx);
+        if (finalOutput) fs.rmSync(stagedOutputPath, { force: true });
         return { ok: true, embedded };
     } catch (err) {
         console.error('[PV INCONS] Lỗi hoàn tất ký số:', err);
@@ -959,62 +1233,197 @@ async function finalizeVnptSignature(tranId, tx, content, user) {
     }
 }
 
+async function getSignTransactionAccessToken(tranId, tx, forceRefresh = false) {
+    const credentials = decryptSignCredentials(tx.credentialsEncrypted);
+    if (!credentials.accessToken) throw new Error('Giao dịch thiếu access token VNPT.');
+
+    if (credentials.refreshToken && (forceRefresh || (credentials.expiresAt && credentials.expiresAt <= Date.now() + 30000))) {
+        const previousCredentials = { ...credentials };
+        const params = new URLSearchParams({
+            grant_type: 'refresh_token',
+            client_id: VNPT_SMARTCA_CLIENT_ID,
+            client_secret: VNPT_SMARTCA_CLIENT_SECRET,
+            refresh_token: credentials.refreshToken,
+            scope: 'sign offline_access openid profile email'
+        });
+        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/auth/token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params
+        });
+        const refreshed = await response.json().catch(() => ({}));
+        if (!response.ok || !refreshed.access_token) {
+            throw new Error(refreshed.error_description || refreshed.error || 'Không thể làm mới access token VNPT cho giao dịch ký.');
+        }
+        credentials.accessToken = refreshed.access_token;
+        credentials.refreshToken = refreshed.refresh_token || credentials.refreshToken;
+        credentials.expiresAt = Number(refreshed.expires_in) > 0
+            ? Date.now() + Number(refreshed.expires_in) * 1000
+            : 0;
+        tx = updateSignTx(tranId, { credentialsEncrypted: encryptSignCredentials(credentials) });
+        syncVnptSessionFromTransaction(tx, previousCredentials, credentials);
+    }
+
+    return credentials.accessToken;
+}
+
+async function pollAndFinalizeSignTransaction(tranId, tx, accessToken, scheduleRetry = false) {
+    const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/gettraninfo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+        body: JSON.stringify({ tranId })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        return { success: false, status: response.status, error: data.message || 'Lỗi kiểm tra trạng thái giao dịch' };
+    }
+    if (data.code !== 0 || !data.content) {
+        return { success: false, status: 400, error: data.message || data.codeDesc || 'Không lấy được trạng thái giao dịch ký số' };
+    }
+
+    const tranStatus = data.content.tranStatus;
+    let embedded = false;
+    if (tranStatus === 1) {
+        const result = await finalizeVnptSignature(tranId, tx, data.content, {
+            username: tx.username,
+            fullName: tx.signedBy || tx.username
+        });
+        if (!result.ok) {
+            return { success: false, status: result.status || 500, retry: !!result.retry, tranStatus, error: result.error };
+        }
+        embedded = !!result.embedded;
+    } else if (tranStatus === 4000 && scheduleRetry) {
+        const attempts = (tx.reconcileAttempts || 0) + 1;
+        const delay = Math.min(15000 * (2 ** Math.min(attempts - 1, 4)), 300000);
+        updateSignTx(tranId, {
+            reconcileAttempts: attempts,
+            nextPollAt: Date.now() + delay
+        });
+    } else if ([4001, 4002, 4003, 4004].includes(tranStatus) && !tx.terminal) {
+        updateSignTx(tranId, { terminal: true, terminalStatus: tranStatus, nextPollAt: 0 });
+    }
+
+    const TRAN_STATUS = {
+        1: 'SUCCESS',
+        4000: 'WAITING_FOR_SIGNER_CONFIRM',
+        4001: 'EXPIRED',
+        4002: 'SIGNER_REJECTED',
+        4003: 'AUTHORIZE_KEY_FAILED',
+        4004: 'SIGN_FAILED'
+    };
+    return {
+        success: true,
+        code: data.code,
+        codeDesc: data.codeDesc,
+        message: data.message,
+        content: { tranId, tranStatus, tranStatusDesc: data.content.tranStatusDesc },
+        tranStatus,
+        tranStatusName: TRAN_STATUS[tranStatus] || 'UNKNOWN',
+        embedded
+    };
+}
+
+const signTxProcessing = new Set();
+async function reconcileSignTransaction(tranId, force = false) {
+    if (signTxProcessing.has(tranId)) return;
+    signTxProcessing.add(tranId);
+    try {
+        const tx = readSignTx()[tranId];
+        if (!tx || tx.done || tx.terminal) return;
+        if (!force && tx.nextPollAt && tx.nextPollAt > Date.now()) return;
+        let accessToken = await getSignTransactionAccessToken(tranId, tx);
+        let result = await pollAndFinalizeSignTransaction(tranId, tx, accessToken, true);
+        if (!result.success && [401, 403].includes(result.status)) {
+            const latestTx = readSignTx()[tranId];
+            accessToken = await getSignTransactionAccessToken(tranId, latestTx, true);
+            result = await pollAndFinalizeSignTransaction(tranId, latestTx, accessToken, true);
+        }
+        if (!result.success) {
+            console.warn(`[PV INCONS] Chưa thể hoàn tất giao dịch VNPT ${tranId}: ${result.error}`);
+            const attempts = (tx.reconcileAttempts || 0) + 1;
+            const delay = Math.min(15000 * (2 ** Math.min(attempts - 1, 4)), 300000);
+            updateSignTx(tranId, {
+                reconcileAttempts: attempts,
+                nextPollAt: Date.now() + delay
+            });
+        }
+    } catch (error) {
+        console.error(`[PV INCONS] Lỗi rà soát giao dịch VNPT ${tranId}:`, error.message);
+        try {
+            const tx = readSignTx()[tranId];
+            if (tx && !tx.done && !tx.terminal) {
+                const attempts = (tx.reconcileAttempts || 0) + 1;
+                const delay = Math.min(15000 * (2 ** Math.min(attempts - 1, 4)), 300000);
+                updateSignTx(tranId, {
+                    reconcileAttempts: attempts,
+                    nextPollAt: Date.now() + delay
+                });
+            }
+        } catch (persistError) {
+            console.error(`[PV INCONS] Không lưu được lịch thử lại giao dịch ${tranId}:`, persistError.message);
+        }
+    } finally {
+        signTxProcessing.delete(tranId);
+    }
+}
+
+function scheduleSignTxReconciliation(tranId) {
+    const timer = setTimeout(() => reconcileSignTransaction(tranId, true), 100);
+    if (typeof timer.unref === 'function') timer.unref();
+}
+
+let signTxReconciliationRunning = false;
+async function reconcilePendingSignTransactions() {
+    if (signTxReconciliationRunning) return;
+    signTxReconciliationRunning = true;
+    try {
+        const transactions = readSignTx();
+        for (const [tranId, tx] of Object.entries(transactions)) {
+            if (!tx.done && !tx.terminal
+                && Date.now() - (tx.createdAt || 0) <= SIGN_TX_TTL_MS
+                && (!tx.nextPollAt || tx.nextPollAt <= Date.now())) {
+                await reconcileSignTransaction(tranId);
+            }
+        }
+    } catch (error) {
+        console.error('[PV INCONS] Không thể đọc danh sách giao dịch ký cần rà soát:', error.message);
+    } finally {
+        signTxReconciliationRunning = false;
+    }
+}
+
 // 10.5. API Kiểm tra trạng thái giao dịch ký số (Get Transaction Info)
 app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) => {
     try {
         const accessToken = req.body && req.body.access_token;
-        if (!accessToken) return res.status(400).json({ success: false, error: 'Thiếu access_token VNPT SmartCA, vui lòng xác thực lại tài khoản SmartCA!' });
         const { tranId } = req.body;
-        const txInfo = readSignTx()[tranId];
+        let txInfo = readSignTx()[tranId];
         if (!txInfo || txInfo.username !== req.authUser.username) {
             return res.status(404).json({ success: false, error: 'Không tìm thấy giao dịch ký số của bạn trên hệ thống CDE (hoặc đã quá 24 giờ).' });
         }
-
-        const response = await fetch(`${VNPT_SMARTCA_BASE_URL}/csc/credentials/gettraninfo`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-            body: JSON.stringify({ tranId: tranId })
-        });
-
-        const data = await response.json();
-        if (!response.ok) return res.status(response.status).json({ success: false, error: data.message || 'Lỗi kiểm tra trạng thái giao dịch' });
-
-        // Mã trạng thái giao dịch theo tài liệu VNPT SmartCA v1.1 (mục 5.2.5)
-        const TRAN_STATUS = {
-            1: 'SUCCESS',
-            4000: 'WAITING_FOR_SIGNER_CONFIRM',
-            4001: 'EXPIRED',
-            4002: 'SIGNER_REJECTED',
-            4003: 'AUTHORIZE_KEY_FAILED',
-            4004: 'SIGN_FAILED'
-        };
-
-        if (data.code !== 0 || !data.content) {
-            return res.status(400).json({ success: false, error: data.message || data.codeDesc || 'Không lấy được trạng thái giao dịch ký số' });
+        if (!txInfo.credentialsEncrypted && accessToken) {
+            txInfo = updateSignTx(tranId, {
+                credentialsEncrypted: encryptSignCredentials({
+                    accessToken,
+                    refreshToken: typeof req.body.refresh_token === 'string' ? req.body.refresh_token : '',
+                    expiresAt: Number(req.body.expires_in) > 0
+                        ? Date.now() + Number(req.body.expires_in) * 1000
+                        : 0
+                })
+            });
+            scheduleSignTxReconciliation(tranId);
         }
-
-        const tranStatus = data.content.tranStatus;
-        let embedded = false;
-        // CHỈ ghi nhận / nhúng chữ ký khi giao dịch thành công (tranStatus = 1). 4000 là đang chờ người ký xác nhận.
-        if (tranStatus === 1) {
-            const result = await finalizeVnptSignature(tranId, txInfo, data.content, req.authUser);
-            if (!result.ok) {
-                return res.status(result.status || 500).json({ success: false, retry: !!result.retry, tranStatus, error: result.error });
-            }
-            embedded = !!result.embedded;
+        const transactionAccessToken = await getSignTransactionAccessToken(tranId, txInfo);
+        const result = await pollAndFinalizeSignTransaction(tranId, txInfo, transactionAccessToken);
+        if (!result.success) {
+            return res.status(result.status || 500).json({
+                success: false,
+                retry: !!result.retry,
+                tranStatus: result.tranStatus,
+                error: result.error
+            });
         }
-
-        // Không trả nguyên data.content (có thể chứa dữ liệu tệp base64) về trình duyệt
-        res.json({
-            success: true,
-            code: data.code,
-            codeDesc: data.codeDesc,
-            message: data.message,
-            content: { tranId, tranStatus, tranStatusDesc: data.content.tranStatusDesc },
-            tranStatus,
-            tranStatusName: TRAN_STATUS[tranStatus] || 'UNKNOWN',
-            embedded
-        });
+        res.json(result);
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -1024,8 +1433,7 @@ app.post('/api/vnpt/credentials/gettraninfo', requireCdeAuth, async (req, res) =
 //  trên server, không kiểm chứng được và không tạo ra chữ ký hợp lệ. Việc nhúng nay do finalizeVnptSignature đảm nhiệm.)
 
 // 10.6. API NHẬN THÔNG BÁO (notifyUrl) TỪ VNPT SMARTCA - server to server, HTTP POST JSON {tranId, refTranId, status}
-// Xác thực bằng SMARTCA_WEBHOOK_TOKEN gắn trong notifyUrl. Chỉ GHI NHẬN thông báo; việc lưu chữ ký vẫn do
-// gettraninfo (tranStatus = 1) quyết định, vì dữ liệu callback không thể kiểm chứng độc lập.
+// Xác thực callback, sau đó worker tự xác minh trạng thái trực tiếp với VNPT trước khi ghi nhận chữ ký.
 function safeEqual(a, b) {
     const x = Buffer.from(String(a || ''));
     const y = Buffer.from(String(b || ''));
@@ -1039,12 +1447,26 @@ app.post('/api/smartca/callback', (req, res) => {
             return res.status(401).json({ success: false, error: 'Unauthorized' });
         }
         const { tranId, refTranId, status } = req.body || {};
+        if (!tranId) return res.status(400).json({ success: false, error: 'Thiếu tranId trong thông báo VNPT.' });
+        const tx = readSignTx()[tranId];
+        if (!tx) {
+            return res.status(503).json({ success: false, error: 'Giao dịch chưa được lưu trên CDE; VNPT có thể gửi lại thông báo.' });
+        }
+        if (tx.refTranId && refTranId && !safeEqual(tx.refTranId, refTranId)) {
+            return res.status(400).json({ success: false, error: 'refTranId không khớp giao dịch đã lưu.' });
+        }
         console.log('[VNPT SMARTCA NOTIFY]', JSON.stringify({ tranId, refTranId, status }));
-        res.json({ success: true, received: true });
+        scheduleSignTxReconciliation(tranId);
+        res.status(202).json({ success: true, received: true });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+const signTxReconciliationTimer = setInterval(reconcilePendingSignTransactions, 15000);
+if (typeof signTxReconciliationTimer.unref === 'function') signTxReconciliationTimer.unref();
+const signTxStartupTimer = setTimeout(reconcilePendingSignTransactions, 2000);
+if (typeof signTxStartupTimer.unref === 'function') signTxStartupTimer.unref();
 
 // API Lấy danh sách chữ ký đã thực hiện (yêu cầu đăng nhập)
 app.get('/api/vnpt/signatures', requireCdeAuth, (req, res) => {
