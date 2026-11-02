@@ -146,7 +146,7 @@ app.post('/api/auth/login', (req, res) => {
             groups: user.groups || []
         };
 
-        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '8h' });
+        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '12h' });
 
         res.json({
             success: true,
