@@ -438,6 +438,12 @@ function canUserWriteReview(user, container) {
     return level === 'FULL CONTROL' || level === 'READ & WRITE';
 }
 
+function cleanVp(v) {
+    const ok3 = a => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
+    if (!v || !ok3(v.p) || !ok3(v.t)) return null;
+    return { p: v.p, t: v.t, u: ok3(v.u) ? v.u : [0, 1, 0], f: Number.isFinite(v.f) ? v.f : 45 };
+}
+
 app.post('/api/review/save', (req, res) => {
     try {
         const authHeader = req.headers.authorization || '';
@@ -486,6 +492,10 @@ app.post('/api/review/save', (req, res) => {
                 globalId: String(c.globalId).slice(0, 80),
                 name: String(c.name || '').slice(0, 300),
                 text: c.text.slice(0, 5000),
+                status: String(c.status || 'Open').slice(0, 40),
+                prio: String(c.prio || 'Normal').slice(0, 40),
+                vp: cleanVp(c.vp),
+                shot: (typeof c.shot === 'string' && c.shot.length < 250000 && /^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/.test(c.shot)) ? c.shot : '',
                 author: user.fullName || user.username,
                 username: user.username,
                 role: String(user.role || ''),
@@ -558,10 +568,10 @@ function getCdeSessionKey(req) {
     return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function storeVnptAuthSession(req, tokenData, credentialIds) {
+function storeVnptAuthSession(req, tokenData, credentialIds, retainSession = true) {
     const sessionKey = getCdeSessionKey(req);
     const cdePayload = jwt.decode((req.headers.authorization || '').slice(7).trim());
-    const expiresAt = cdePayload && cdePayload.exp
+    const cdeExpiresAt = cdePayload && cdePayload.exp
         ? cdePayload.exp * 1000
         : Date.now() + 12 * 60 * 60 * 1000;
     for (const [key, session] of VNPT_AUTH_SESSIONS) {
@@ -570,7 +580,9 @@ function storeVnptAuthSession(req, tokenData, credentialIds) {
     VNPT_AUTH_SESSIONS.set(sessionKey, {
         username: req.authUser.username,
         credentialIds,
-        expiresAt,
+        retainSession,
+        cdeExpiresAt,
+        expiresAt: retainSession ? cdeExpiresAt : Math.min(cdeExpiresAt, Date.now() + 15 * 60 * 1000),
         credentialsEncrypted: encryptSignCredentials({
             accessToken: tokenData.access_token,
             refreshToken: tokenData.refresh_token || '',
@@ -644,7 +656,12 @@ async function getVnptAuthSession(req, forceRefresh = false) {
         credentials = decryptSignCredentials(session.credentialsEncrypted);
     }
 
-    return { ...credentials, credentialIds: session.credentialIds, sessionKey };
+    return {
+        ...credentials,
+        credentialIds: session.credentialIds,
+        sessionKey,
+        retainSession: session.retainSession
+    };
 }
 
 async function requestVnptWithSession(req, endpoint, body) {
@@ -878,7 +895,7 @@ app.post('/api/vnpt/token', requireCdeAuth, async (req, res) => {
         if (credentialIds.length === 0) {
             return res.status(400).json({ success: false, error: 'Tài khoản VNPT chưa được cấp chứng thư số hoạt động.' });
         }
-        storeVnptAuthSession(req, data, credentialIds);
+        storeVnptAuthSession(req, data, credentialIds, req.body.retain_session !== false);
         res.json({ success: true, content: credentialIds });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -906,9 +923,29 @@ app.post('/api/vnpt/credentials/list', requireCdeAuth, async (req, res) => {
 app.post('/api/vnpt/session', requireCdeAuth, async (req, res) => {
     try {
         const session = await getVnptAuthSession(req);
+        if (!session.retainSession) {
+            return res.status(401).json({ success: false, error: 'Phiên VNPT hiện tại không được lưu để dùng cho lần ký tiếp theo.' });
+        }
         res.json({ success: true, content: session.credentialIds });
     } catch (error) {
         res.status(error.status || 500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/vnpt/session/retention', requireCdeAuth, (req, res) => {
+    try {
+        const sessionKey = getCdeSessionKey(req);
+        const session = VNPT_AUTH_SESSIONS.get(sessionKey);
+        if (!session || session.username !== req.authUser.username || session.expiresAt <= Date.now()) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy phiên VNPT đang hoạt động.' });
+        }
+        session.retainSession = req.body.retain_session === true;
+        session.expiresAt = session.retainSession
+            ? session.cdeExpiresAt
+            : Math.min(session.cdeExpiresAt, Date.now() + 15 * 60 * 1000);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -955,9 +992,19 @@ app.post('/api/vnpt/credentials/info', requireCdeAuth, async (req, res) => {
 //  - Khác : chỉ ký SHA-256 của tệp và ghi nhận trong signatures.json (không thể nhúng vào định dạng khác).
 app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
     try {
-        const { credentialId, filePath, description } = req.body;
+        const { credentialId, filePath, description, retain_session } = req.body;
         if (!credentialId) return res.status(400).json({ success: false, error: 'Thiếu credentialId (Chứng thư số) cần dùng để ký!' });
         const vnptSession = await getVnptAuthSession(req);
+        if (typeof retain_session === 'boolean') {
+            vnptSession.retainSession = retain_session;
+            const sessionRecord = VNPT_AUTH_SESSIONS.get(vnptSession.sessionKey);
+            if (sessionRecord) {
+                sessionRecord.retainSession = retain_session;
+                sessionRecord.expiresAt = retain_session
+                    ? sessionRecord.cdeExpiresAt
+                    : Math.min(sessionRecord.cdeExpiresAt, Date.now() + 15 * 60 * 1000);
+            }
+        }
         if (!vnptSession.credentialIds.includes(credentialId)) {
             return res.status(403).json({ success: false, error: 'Chứng thư số không thuộc phiên VNPT SmartCA đang hoạt động.' });
         }
@@ -1122,6 +1169,9 @@ app.post('/api/vnpt/signature/signhash', requireCdeAuth, async (req, res) => {
             });
         }
 
+        if (!vnptSession.retainSession) {
+            VNPT_AUTH_SESSIONS.delete(vnptSession.sessionKey);
+        }
         scheduleSignTxReconciliation(data.content.tranId);
         res.json({ success: true, ...data, filePath, fileName: fileInfo.fileName, mode: txExtra.mode });
     } catch (error) {
@@ -1802,6 +1852,107 @@ app.post('/api/create-project', (req, res) => {
 // ===============================================================
 // 14. STATIC SERVE & KHỞI ĐỘNG SERVER
 // ===============================================================
+// ===============================================================
+// 9B. DỮ LIỆU THI CÔNG THEO CẤU KIỆN (trạng thái / 4D / ảnh) - LƯU BỀN VỮNG
+//     Khóa theo đường dẫn file mô hình + GlobalId. Quyền theo REVIEW_ZONE_ACCESS (ISO 19650).
+// ===============================================================
+const PROGRESS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'element_progress.json');
+const PROGRESS_AUDIT_PATH = path.join(BASE_DATABASE_DIR, 'element_progress_audit.json');
+const PROG_ST = ['CHUA', 'DANG', 'HT', 'NT'];
+const PROG_GID = /^[0-9A-Za-z_$]{22}$/;
+const PROG_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const PROG_URL = /^(https:\/\/|\/(?!\/))[^\s"'<>]{1,500}$/;
+let progressQueue = Promise.resolve();
+
+function progAuth(req, res) {
+    const h = req.headers.authorization || '';
+    const token = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+    if (!token) { res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' }); return null; }
+    let payload;
+    try { payload = jwt.verify(token, JWT_SECRET); }
+    catch (e) { res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' }); return null; }
+    const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+    const user = users.find(u => u.username === payload.username);
+    if (!user || user.status === 'Inactive') { res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' }); return null; }
+    return user;
+}
+function progModel(res, filePath) {
+    const rel = String(filePath || '').replace(/\\/g, '/').replace(/^database\/bim-vdc\/?/, '').replace(/^\/+/, '');
+    const full = path.resolve(ROOT_DIR, rel);
+    if (!rel || !full.startsWith(ROOT_DIR + path.sep) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
+        res.status(400).json({ success: false, error: 'Đường dẫn mô hình không hợp lệ hoặc không tồn tại!' }); return null;
+    }
+    return { rel, container: getContainerFromPath(rel) };
+}
+function canUserReadModel(user, container) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    if (permission === 'ADMIN' || role === 'ADMIN') return true;
+    if (!container) return false;
+    const level = (REVIEW_ZONE_ACCESS[permission] || REVIEW_ZONE_ACCESS[role] || {})[container];
+    return !!level && level !== 'NO ACCESS';
+}
+function cleanProgItem(v) {
+    if (!v || typeof v !== 'object') return null;
+    return {
+        st: PROG_ST.includes(v.st) ? v.st : '',
+        start: PROG_DATE.test(v.start || '') ? v.start : '',
+        end: PROG_DATE.test(v.end || '') ? v.end : '',
+        note: String(v.note || '').slice(0, 500),
+        photos: (Array.isArray(v.photos) ? v.photos : []).map(String).filter(u => PROG_URL.test(u)).slice(0, 20)
+    };
+}
+function progRead(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8') || 'null') || fallback; } catch (e) { return fallback; } }
+function progWrite(file, data) { const tmp = file + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(data), 'utf8'); fs.renameSync(tmp, file); }
+
+app.get('/api/progress', (req, res) => {
+    try {
+        const user = progAuth(req, res); if (!user) return;
+        const m = progModel(res, req.query.file); if (!m) return;
+        if (!canUserReadModel(user, m.container)) return res.status(403).json({ success: false, error: 'Bạn không có quyền xem dữ liệu thi công của thư mục này!' });
+        const rec = progRead(PROGRESS_FILE_PATH, {})[m.rel] || { items: {} };
+        res.json({ success: true, items: rec.items || {}, updatedAt: rec.updatedAt || null, canWrite: canUserWriteReview(user, m.container) });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post('/api/progress/save', (req, res) => {
+    const user = progAuth(req, res); if (!user) return;
+    const m = progModel(res, req.body && req.body.filePath); if (!m) return;
+    if (!canUserWriteReview(user, m.container)) return res.status(403).json({ success: false, error: 'Bạn cần quyền Read & Write hoặc Full Control trên thư mục này để lưu dữ liệu thi công!' });
+    const items = req.body.items;
+    if (!items || typeof items !== 'object' || Array.isArray(items)) return res.status(400).json({ success: false, error: 'Thiếu dữ liệu!' });
+    const keys = Object.keys(items);
+    if (keys.length > 5000) return res.status(400).json({ success: false, error: 'Tối đa 5000 cấu kiện mỗi lần lưu!' });
+    progressQueue = progressQueue.then(() => {
+        const all = progRead(PROGRESS_FILE_PATH, {});
+        const rec = all[m.rel] || { items: {} };
+        const by = user.fullName || user.username, at = new Date().toISOString();
+        let saved = 0, deleted = 0;
+        for (const g of keys) {
+            if (!PROG_GID.test(g)) continue;
+            if (items[g] === null) { if (rec.items[g]) { delete rec.items[g]; deleted++; } continue; }
+            const c = cleanProgItem(items[g]);
+            if (c) { rec.items[g] = { ...c, by, at }; saved++; }
+        }
+        rec.updatedAt = at;
+        all[m.rel] = rec;
+        progWrite(PROGRESS_FILE_PATH, all);
+        const log = progRead(PROGRESS_AUDIT_PATH, []);
+        log.push({ at, user: user.username, name: by, file: m.rel, saved, deleted });
+        progWrite(PROGRESS_AUDIT_PATH, log.slice(-5000));
+        res.json({ success: true, saved, deleted });
+    }).catch(error => { if (!res.headersSent) res.status(500).json({ success: false, error: error.message }); });
+});
+
+app.get('/api/progress/audit', (req, res) => {
+    try {
+        const user = progAuth(req, res); if (!user) return;
+        const m = progModel(res, req.query.file); if (!m) return;
+        if (!canUserWriteReview(user, m.container)) return res.status(403).json({ success: false, error: 'Không đủ quyền xem nhật ký!' });
+        res.json({ success: true, log: progRead(PROGRESS_AUDIT_PATH, []).filter(x => x.file === m.rel).slice(-200).reverse() });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
 app.use('/files', express.static(ROOT_DIR));
 
 app.use('/vendor/three', express.static(path.join(__dirname, 'node_modules', 'three')));
