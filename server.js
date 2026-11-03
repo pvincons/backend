@@ -693,9 +693,58 @@ function syncVnptSessionFromTransaction(tx, previousCredentials, refreshedCreden
 }
 
 const SIGNATURES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'signatures.json');
+const FILE_METADATA_FILE_PATH = path.join(BASE_DATABASE_DIR, 'file_metadata.json');
 
 if (!fs.existsSync(SIGNATURES_FILE_PATH)) {
     fs.writeFileSync(SIGNATURES_FILE_PATH, JSON.stringify({}, null, 2), 'utf8');
+}
+if (!fs.existsSync(FILE_METADATA_FILE_PATH)) {
+    fs.writeFileSync(FILE_METADATA_FILE_PATH, JSON.stringify({}, null, 2), 'utf8');
+}
+
+function readFileMetadataDB() {
+    return JSON.parse(fs.readFileSync(FILE_METADATA_FILE_PATH, 'utf8') || '{}');
+}
+
+function writeFileMetadataDB(db) {
+    const tmp = `${FILE_METADATA_FILE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+        fs.renameSync(tmp, FILE_METADATA_FILE_PATH);
+        return true;
+    } catch (error) {
+        try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+        console.error('Lỗi ghi file_metadata.json:', error);
+        return false;
+    }
+}
+
+function rekeyFileMetadata(oldPath, newPath) {
+    const oldKey = normRecallKey(oldPath);
+    const newKey = normRecallKey(newPath);
+    const db = readFileMetadataDB();
+    let changed = false;
+    Object.keys(db).forEach(key => {
+        if (key === oldKey || key.startsWith(oldKey + '/')) {
+            db[newKey + key.slice(oldKey.length)] = db[key];
+            delete db[key];
+            changed = true;
+        }
+    });
+    if (changed) writeFileMetadataDB(db);
+}
+
+function removeFileMetadata(itemPath) {
+    const key = normRecallKey(itemPath);
+    const db = readFileMetadataDB();
+    let changed = false;
+    Object.keys(db).forEach(existingKey => {
+        if (existingKey === key || existingKey.startsWith(key + '/')) {
+            delete db[existingKey];
+            changed = true;
+        }
+    });
+    if (changed) writeFileMetadataDB(db);
 }
 
 // Hàm băm file CDE chuẩn SHA-256 dạng Base64
@@ -1532,7 +1581,7 @@ app.get('/api/vnpt/signatures', requireCdeAuth, (req, res) => {
 // ===============================================================
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        const relPath = req.query.path || req.body.targetPath || '';
+        const relPath = req.query.path || req.body.targetPath || req.body.targetFolder || '';
         const targetDir = path.join(ROOT_DIR, relPath.replace(/^database\/bim-vdc\/?/, ''));
         if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
         cb(null, targetDir);
@@ -1541,7 +1590,16 @@ const storage = multer.diskStorage({
         cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8'));
     }
 });
-const upload = multer({ storage: storage });
+const upload = multer({
+    storage,
+    fileFilter: (req, file, cb) => {
+        const targetPath = req.query.path || req.body.targetPath || req.body.targetFolder || '';
+        if (!canUserUploadInZone(req.authUser, getZoneFromPath(targetPath))) {
+            return cb(new Error('Bạn không có quyền tải tệp lên khu vực này.'));
+        }
+        cb(null, true);
+    }
+});
 
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'CDE & Auth Backend Server đang hoạt động ổn định!' });
@@ -1552,49 +1610,139 @@ app.get('/api/files', (req, res) => {
         const subPath = (req.query.path || '').replace(/^database\/bim-vdc\/?/, '');
         const targetDir = path.join(ROOT_DIR, subPath);
         if (!fs.existsSync(targetDir)) return res.status(404).json({ error: 'Thư mục không tồn tại' });
+        const metadataDB = readFileMetadataDB();
         const items = fs.readdirSync(targetDir, { withFileTypes: true });
         res.json(items.map(item => {
             const fullPath = path.join(targetDir, item.name);
             let size = 0;
+            let stats = null;
             try {
                 if (!item.isDirectory()) {
-                    const stats = fs.statSync(fullPath);
+                    stats = fs.statSync(fullPath);
                     size = stats.size;
                 }
             } catch (e) {
                 // Bỏ qua lỗi nếu file đang bị khóa hoặc không đọc được stat
             }
+            const itemPath = 'database/bim-vdc/' + path.join(subPath, item.name).replace(/\\/g, '/');
+            const metadata = metadataDB[normRecallKey(itemPath)] || {};
+            const fileUpdatedAt = stats ? stats.mtime.toISOString() : '';
+            const metadataUpdatedAt = metadata.updatedAt || '';
             return {
                 name: item.name,
                 isDirectory: item.isDirectory(),
                 type: item.isDirectory() ? 'folder' : 'file',
                 size: size,
-                path: 'database/bim-vdc/' + path.join(subPath, item.name).replace(/\\/g, '/')
+                path: itemPath,
+                metadata: item.isDirectory() ? null : {
+                    description: metadata.description || '',
+                    author: metadata.author || '',
+                    createdAt: metadata.createdAt || (stats ? stats.birthtime.toISOString() : ''),
+                    updatedAt: metadataUpdatedAt && (!fileUpdatedAt || Date.parse(metadataUpdatedAt) > Date.parse(fileUpdatedAt))
+                        ? metadataUpdatedAt
+                        : fileUpdatedAt,
+                    status: metadata.status || 'PENDING',
+                    suitability: metadata.suitability || '',
+                    discipline: metadata.discipline || ''
+                }
             };
         }));
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.post('/api/file-metadata', requireCdeAuth, (req, res) => {
+    try {
+        const { filePath, description, status, suitability, discipline } = req.body || {};
+        if (typeof filePath !== 'string' || !filePath.trim()) {
+            return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp.' });
+        }
+        if (typeof description !== 'string' || description.length > 2000) {
+            return res.status(400).json({ success: false, error: 'Mô tả tối đa 2000 ký tự.' });
+        }
+        const normalizedPath = normRecallKey(filePath);
+        const relativePath = normalizedPath.replace(/^database\/bim-vdc\/?/, '');
+        const fullPath = path.resolve(ROOT_DIR, relativePath);
+        const rootPath = path.resolve(ROOT_DIR);
+        if (!fullPath.startsWith(rootPath + path.sep) || !fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy tệp cần cập nhật thông tin.' });
+        }
+        if (!canUserWriteReview(req.authUser, getContainerFromPath(normalizedPath))) {
+            return res.status(403).json({ success: false, error: 'Bạn không có quyền cập nhật thông tin trong khu vực này.' });
+        }
+        const validStatuses = ['PENDING', 'APPROVED', 'REJECTED'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ success: false, error: 'Trạng thái duyệt không hợp lệ.' });
+        }
+        const validSuitabilities = ['S0', 'S1', 'S2', 'S3', 'S4', 'A1', 'A2'];
+        if (suitability !== undefined && !validSuitabilities.includes(suitability)) {
+            return res.status(400).json({ success: false, error: 'Suitability không hợp lệ.' });
+        }
+        const validDisciplines = ['ARC', 'STR', 'MEP', 'HVAC'];
+        if (discipline !== undefined &&
+            (typeof discipline !== 'string' || !discipline.trim() || discipline.length > 100 ||
+                (!validDisciplines.includes(discipline) && discipline === 'CUSTOM'))) {
+            return res.status(400).json({ success: false, error: 'Bộ môn không hợp lệ.' });
+        }
+
+        const db = readFileMetadataDB();
+        const previous = db[normalizedPath] || {};
+        const now = new Date().toISOString();
+        const metadata = {
+            description: description.trim(),
+            author: previous.author || '',
+            createdAt: previous.createdAt || fs.statSync(fullPath).birthtime.toISOString(),
+            updatedAt: now,
+            status,
+            suitability: suitability || previous.suitability || '',
+            discipline: typeof discipline === 'string' ? discipline.trim() : previous.discipline || ''
+        };
+        db[normalizedPath] = metadata;
+        if (!writeFileMetadataDB(db)) {
+            return res.status(500).json({ success: false, error: 'Không thể lưu thông tin tệp.' });
+        }
+        res.json({ success: true, metadata });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/api/cde-files', (req, res) => {
     try {
+        const metadataDB = readFileMetadataDB();
         function walkDir(dir, fileList = []) {
             fs.readdirSync(dir, { withFileTypes: true }).forEach(file => {
                 const fullPath = path.join(dir, file.name);
                 const relPath = path.relative(BASE_DATABASE_DIR, fullPath).replace(/\\/g, '/');
                 let size = 0;
+                let stats = null;
                 try {
                     if (!file.isDirectory()) {
-                        const stats = fs.statSync(fullPath);
+                        stats = fs.statSync(fullPath);
                         size = stats.size;
                     }
                 } catch (e) {
                     // Bỏ qua lỗi stat
                 }
+                const itemPath = 'database/' + relPath;
+                const metadata = metadataDB[normRecallKey(itemPath)] || {};
+                const fileUpdatedAt = stats ? stats.mtime.toISOString() : '';
+                const metadataUpdatedAt = metadata.updatedAt || '';
                 fileList.push({
                     name: file.name,
-                    path: 'database/' + relPath,
+                    path: itemPath,
                     type: file.isDirectory() ? 'folder' : 'file',
-                    size: size
+                    size: size,
+                    metadata: file.isDirectory() ? null : {
+                        description: metadata.description || '',
+                        author: metadata.author || '',
+                        createdAt: metadata.createdAt || (stats ? stats.birthtime.toISOString() : ''),
+                        updatedAt: metadataUpdatedAt && (!fileUpdatedAt || Date.parse(metadataUpdatedAt) > Date.parse(fileUpdatedAt))
+                            ? metadataUpdatedAt
+                            : fileUpdatedAt,
+                        status: metadata.status || 'PENDING',
+                        suitability: metadata.suitability || '',
+                        discipline: metadata.discipline || ''
+                    }
                 });
                 if (file.isDirectory()) walkDir(fullPath, fileList);
             });
@@ -1604,8 +1752,39 @@ app.get('/api/cde-files', (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.post('/api/upload', upload.single('file'), (req, res) => {
-    res.json({ success: true, message: 'Tải lên tập tin thành công!' });
+app.post('/api/upload', requireCdeAuth, (req, res) => {
+    upload.any()(req, res, error => {
+        if (error) {
+            return res.status(403).json({ success: false, error: error.message });
+        }
+        try {
+            const files = req.files || [];
+            if (!files.length) {
+                return res.status(400).json({ success: false, error: 'Vui lòng chọn tệp cần tải lên.' });
+            }
+            const metadataDB = readFileMetadataDB();
+            const uploadedAt = new Date().toISOString();
+            files.forEach(file => {
+                const relativePath = path.relative(ROOT_DIR, file.path).replace(/\\/g, '/');
+                const metadataPath = normRecallKey(`database/bim-vdc/${relativePath}`);
+                const previous = metadataDB[metadataPath] || {};
+                const stats = fs.statSync(file.path);
+                metadataDB[metadataPath] = {
+                    ...previous,
+                    author: req.authUser.fullName || req.authUser.username,
+                    createdAt: previous.createdAt || stats.birthtime.toISOString(),
+                    updatedAt: uploadedAt,
+                    status: previous.status || 'PENDING'
+                };
+            });
+            if (!writeFileMetadataDB(metadataDB)) {
+                return res.status(500).json({ success: false, error: 'Tệp đã tải lên nhưng không thể lưu thông tin tác giả.' });
+            }
+            res.json({ success: true, message: 'Tải lên tập tin thành công!' });
+        } catch (uploadError) {
+            res.status(500).json({ success: false, error: uploadError.message });
+        }
+    });
 });
 
 app.post('/api/create-folder', (req, res) => {
@@ -1630,6 +1809,7 @@ app.post('/api/rename', (req, res) => {
             const renamedKey = path.posix.join(path.posix.dirname(normRecallKey(itemPath)), newName);
             rekeyRecalls(itemPath, renamedKey);
             rekeyIssues(itemPath, renamedKey);
+            rekeyFileMetadata(itemPath, renamedKey);
             res.json({ success: true, message: 'Đổi tên thành công!' });
         } else {
             res.status(404).json({ success: false, error: 'Đường dẫn không tồn tại!' });
@@ -1644,6 +1824,7 @@ app.post('/api/delete', (req, res) => {
             fs.rmSync(fullPath, { recursive: true, force: true });
             removeRecalls(req.body.path);
             removeIssues(req.body.path);
+            removeFileMetadata(req.body.path);
             res.json({ success: true, message: 'Xóa thành công!' });
         } else {
             res.status(404).json({ success: false, error: 'Không tồn tại!' });
@@ -1665,6 +1846,7 @@ app.post('/api/move', (req, res) => {
         const movedKey = path.posix.join(normRecallKey(targetDir), path.basename(srcFullPath));
         rekeyRecalls(sourcePath, movedKey);
         rekeyIssues(sourcePath, movedKey);
+        rekeyFileMetadata(sourcePath, movedKey);
         res.json({ success: true, message: 'Di chuyển thành công!' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
