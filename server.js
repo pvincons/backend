@@ -1635,6 +1635,7 @@ app.get('/api/files', (req, res) => {
                 size: size,
                 path: itemPath,
                 metadata: item.isDirectory() ? null : {
+                    title: (metadata.title || '').toLocaleUpperCase('vi-VN'),
                     description: metadata.description || '',
                     author: metadata.author || '',
                     createdAt: metadata.createdAt || (stats ? stats.birthtime.toISOString() : ''),
@@ -1652,9 +1653,12 @@ app.get('/api/files', (req, res) => {
 
 app.post('/api/file-metadata', requireCdeAuth, (req, res) => {
     try {
-        const { filePath, description, status, suitability, discipline } = req.body || {};
+        const { filePath, title, description, status, suitability, discipline } = req.body || {};
         if (typeof filePath !== 'string' || !filePath.trim()) {
             return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp.' });
+        }
+        if (title !== undefined && (typeof title !== 'string' || title.length > 2000)) {
+            return res.status(400).json({ success: false, error: 'Tiêu đề tối đa 2000 ký tự.' });
         }
         if (typeof description !== 'string' || description.length > 2000) {
             return res.status(400).json({ success: false, error: 'Mô tả tối đa 2000 ký tự.' });
@@ -1688,6 +1692,7 @@ app.post('/api/file-metadata', requireCdeAuth, (req, res) => {
         const previous = db[normalizedPath] || {};
         const now = new Date().toISOString();
         const metadata = {
+            title: title === undefined ? (previous.title || '').toLocaleUpperCase('vi-VN') : title.trim().toLocaleUpperCase('vi-VN'),
             description: description.trim(),
             author: previous.author || '',
             createdAt: previous.createdAt || fs.statSync(fullPath).birthtime.toISOString(),
@@ -1733,6 +1738,7 @@ app.get('/api/cde-files', (req, res) => {
                     type: file.isDirectory() ? 'folder' : 'file',
                     size: size,
                     metadata: file.isDirectory() ? null : {
+                        title: (metadata.title || '').toLocaleUpperCase('vi-VN'),
                         description: metadata.description || '',
                         author: metadata.author || '',
                         createdAt: metadata.createdAt || (stats ? stats.birthtime.toISOString() : ''),
@@ -1762,6 +1768,18 @@ app.post('/api/upload', requireCdeAuth, (req, res) => {
             if (!files.length) {
                 return res.status(400).json({ success: false, error: 'Vui lòng chọn tệp cần tải lên.' });
             }
+            const { title = '', description = '', status = 'PENDING', suitability = 'S0', discipline = 'ARC' } = req.body || {};
+            const validStatuses = ['PENDING', 'APPROVED', 'REJECTED'];
+            const validSuitabilities = ['S0', 'S1', 'S2', 'S3', 'S4', 'A1', 'A2'];
+            const validDisciplines = ['ARC', 'STR', 'MEP', 'HVAC'];
+            if (typeof title !== 'string' || title.length > 2000 ||
+                typeof description !== 'string' || description.length > 2000 ||
+                !validStatuses.includes(status) ||
+                !validSuitabilities.includes(suitability) ||
+                !validDisciplines.includes(discipline)) {
+                files.forEach(file => fs.unlinkSync(file.path));
+                return res.status(400).json({ success: false, error: 'Thông tin metadata tải lên không hợp lệ.' });
+            }
             const metadataDB = readFileMetadataDB();
             const uploadedAt = new Date().toISOString();
             files.forEach(file => {
@@ -1771,10 +1789,14 @@ app.post('/api/upload', requireCdeAuth, (req, res) => {
                 const stats = fs.statSync(file.path);
                 metadataDB[metadataPath] = {
                     ...previous,
+                    title: title.trim().toLocaleUpperCase('vi-VN'),
+                    description: description.trim(),
                     author: req.authUser.fullName || req.authUser.username,
                     createdAt: previous.createdAt || stats.birthtime.toISOString(),
                     updatedAt: uploadedAt,
-                    status: previous.status || 'PENDING'
+                    status,
+                    suitability,
+                    discipline
                 };
             });
             if (!writeFileMetadataDB(metadataDB)) {
