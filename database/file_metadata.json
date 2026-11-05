@@ -125,5 +125,65 @@
     "status": "PENDING",
     "suitability": "S0",
     "discipline": "STR"
+  },
+  "database/bim-vdc/Project 101/03_PUBLISHED/IFC các bộ môn được phê duyệt.txt": {
+    "title": "",
+    "description": "",
+    "author": "",
+    "createdAt": "2026-11-05T09:34:04.168Z",
+    "updatedAt": "2026-11-05T09:39:46.887Z",
+    "status": "APPROVED",
+    "suitability": "A1",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/Project 101/03_PUBLISHED/PDF bản vẽ phát hành có ký số.txt": {
+    "title": "",
+    "description": "",
+    "author": "",
+    "createdAt": "2026-11-05T09:30:45.721Z",
+    "updatedAt": "2026-11-05T09:40:03.033Z",
+    "status": "APPROVED",
+    "suitability": "A1",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/Project 101/03_PUBLISHED/PDF giấy phép và hồ sơ pháp lý.txt": {
+    "title": "",
+    "description": "",
+    "author": "",
+    "createdAt": "2026-11-05T09:31:28.156Z",
+    "updatedAt": "2026-11-05T09:40:16.379Z",
+    "status": "APPROVED",
+    "suitability": "A1",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/Project 101/03_PUBLISHED/PDF file khối lượng mời thầu.txt": {
+    "title": "",
+    "description": "",
+    "author": "",
+    "createdAt": "2026-11-05T09:31:10.239Z",
+    "updatedAt": "2026-11-05T09:40:30.109Z",
+    "status": "APPROVED",
+    "suitability": "A1",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/Project 101/04_ARCHIVE/File nén các phiên bản cũ.txt": {
+    "title": "",
+    "description": "",
+    "author": "",
+    "createdAt": "2026-11-05T09:33:12.388Z",
+    "updatedAt": "2026-11-05T09:42:42.963Z",
+    "status": "REJECTED",
+    "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/Project 101/04_ARCHIVE/File nén hồ sơ hoàn công.txt": {
+    "title": "",
+    "description": "",
+    "author": "",
+    "createdAt": "2026-11-05T09:33:35.693Z",
+    "updatedAt": "2026-11-05T09:42:50.983Z",
+    "status": "APPROVED",
+    "suitability": "S0",
+    "discipline": "ARC"
   }
 }
