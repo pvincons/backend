@@ -25,7 +25,7 @@
     "phone": "0939751194",
     "position": "Giám đốc",
     "discipline": "Kỹ sư",
-    "projects": "@Sample Project, Project 101",
+    "projects": "@Sample Project, @SampleZ101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -40,7 +40,7 @@
     "phone": "0772194789",
     "position": "Chủ trì thiết kế",
     "discipline": "Kiến trúc sư",
-    "projects": "@Sample Project, Project 101",
+    "projects": "@Sample Project, @SampleZ101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -55,7 +55,7 @@
     "phone": "0939123456",
     "position": "Chủ đầu tư",
     "discipline": "",
-    "projects": "@Sample Project, Project 101",
+    "projects": "@Sample Project, @SampleZ101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -70,7 +70,7 @@
     "phone": "0772123146",
     "position": "Chỉ huy trưởng",
     "discipline": "Kỹ sư",
-    "projects": "@Sample Project, Project 101",
+    "projects": "@Sample Project, @SampleZ101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -100,7 +100,7 @@
     "phone": "",
     "position": "Nhân viên",
     "discipline": "Cử nhân kinh tế",
-    "projects": "@Sample Project, Project 101",
+    "projects": "@Sample Project, @SampleZ101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -130,7 +130,7 @@
     "phone": "0939 257 429",
     "position": "Giám đốc",
     "discipline": "Thạc sỹ",
-    "projects": "@Sample Project, Project 101",
+    "projects": "@Sample Project, @SampleZ101",
     "company": "TRIỀU PHÁT",
     "status": "Active"
   }
