@@ -22,6 +22,7 @@ app.set('trust proxy', true);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
+const USERS_JSON_URL = process.env.USERS_JSON_URL || 'http://localhost:5500/assets/data/users.json';
 
 // Bắt buộc có đủ biến môi trường (thiếu thì dừng server, KHÔNG dùng giá trị mặc định)
 const REQUIRED_ENV = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET'];
@@ -57,19 +58,17 @@ app.use((req, res, next) => {
 // ===============================================================
 // 2. KHỞI TẠO CÁC THƯ MỤC & DỮ LIỆU MẶC ĐỊNH
 // ===============================================================
-const USER_FILE_PATH = path.join(__dirname, 'assets', 'data', 'users.json');
 const AVATAR_DIR = path.join(__dirname, 'assets', 'data', 'avatar');
 
 // Linh hoạt đường dẫn: Biến môi trường DATABASE_PATH (Production/VPS) hoặc thư mục local
 const BASE_DATABASE_DIR = process.env.DATABASE_PATH || path.join(__dirname, 'database');
+const USERS_CACHE_PATH = path.join(BASE_DATABASE_DIR, 'users-cache.json');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
 const RECALLS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'recalls.json');
 
 // Đảm bảo thư mục tồn tại
-if (!fs.existsSync(path.dirname(USER_FILE_PATH))) {
-    fs.mkdirSync(path.dirname(USER_FILE_PATH), { recursive: true });
-}
+fs.mkdirSync(BASE_DATABASE_DIR, { recursive: true });
 if (!fs.existsSync(AVATAR_DIR)) {
     fs.mkdirSync(AVATAR_DIR, { recursive: true });
 }
@@ -77,27 +76,33 @@ if (!fs.existsSync(ROOT_DIR)) {
     fs.mkdirSync(ROOT_DIR, { recursive: true });
 }
 
-// Khởi tạo tài khoản Administrator mặc định nếu chưa có
-if (!fs.existsSync(USER_FILE_PATH)) {
-    const defaultPasswordHash = bcrypt.hashSync("123456", 10);
-    const defaultUsers = [
-        {
-            "id": 1,
-            "username": "admin",
-            "passwordHash": defaultPasswordHash,
-            "role": "ADMIN",
-            "permission": "ADMIN",
-            "avatarLink": "",
-            "fullName": "Administrator",
-            "phone": "0939751194",
-            "position": "Quản trị hệ thống",
-            "discipline": "Kỹ sư IT",
-            "projects": "Tất cả dự án",
-            "company": "PV INCONS CO.LTD",
-            "status": "Active"
+let usersRefreshPromise = null;
+async function refreshUsersCache() {
+    if (usersRefreshPromise) return usersRefreshPromise;
+    usersRefreshPromise = (async () => {
+        const response = await fetch(USERS_JSON_URL, {
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+            signal: AbortSignal.timeout(10000)
+        });
+        if (!response.ok) throw new Error(`Không tải được users.json (HTTP ${response.status}) từ ${USERS_JSON_URL}`);
+        const users = await response.json();
+        if (!Array.isArray(users)) throw new Error(`users.json tại ${USERS_JSON_URL} phải là một mảng JSON.`);
+
+        const tmp = `${USERS_CACHE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+        try {
+            fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
+            fs.renameSync(tmp, USERS_CACHE_PATH);
+        } catch (error) {
+            try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+            throw error;
         }
-    ];
-    fs.writeFileSync(USER_FILE_PATH, JSON.stringify(defaultUsers, null, 2), 'utf8');
+    })();
+    try {
+        await usersRefreshPromise;
+    } finally {
+        usersRefreshPromise = null;
+    }
 }
 
 // ===============================================================
@@ -129,7 +134,7 @@ app.post('/api/auth/login', (req, res) => {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập đầy đủ tài khoản và mật khẩu!' });
         }
 
-        const data = fs.readFileSync(USER_FILE_PATH, 'utf8');
+        const data = fs.readFileSync(USERS_CACHE_PATH, 'utf8');
         const users = JSON.parse(data || '[]');
         const user = users.find(u => u.username === username);
 
@@ -162,6 +167,26 @@ app.post('/api/auth/login', (req, res) => {
     }
 });
 
+app.get('/api/auth/me', requireCdeAuth, (req, res) => {
+    const user = req.authUser;
+    res.json({
+        success: true,
+        user: {
+            username: user.username,
+            fullName: user.fullName,
+            role: user.role,
+            permission: user.permission,
+            position: user.position,
+            company: user.company,
+            phone: user.phone,
+            discipline: user.discipline,
+            projects: user.projects,
+            status: user.status,
+            avatarLink: user.avatarLink
+        }
+    });
+});
+
 // ===============================================================
 // 4.1 API ĐỔI MẬT KHẨU NGƯỜI DÙNG HIỆN TẠI
 // ===============================================================
@@ -185,25 +210,15 @@ app.post('/api/change-password', (req, res) => {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập mật khẩu mới!' });
         }
 
-        const data = fs.readFileSync(USER_FILE_PATH, 'utf8');
-        const users = JSON.parse(data || '[]');
-
-        const userIndex = users.findIndex(u => u.username === payload.username);
-        if (userIndex === -1) {
+        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+        if (!users.some(user => user.username === payload.username)) {
             return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản người dùng trong hệ thống!' });
         }
 
-        const saltRounds = 10;
-        const hashedNewPassword = bcrypt.hashSync(newPassword, saltRounds);
-
-        users[userIndex] = {
-            ...users[userIndex],
-            passwordHash: hashedNewPassword
-        };
-
-        fs.writeFileSync(USER_FILE_PATH, JSON.stringify(users, null, 2), 'utf8');
-
-        res.json({ success: true, message: 'Đổi mật khẩu thành công!' });
+        return res.status(409).json({
+            success: false,
+            error: 'Tài khoản được quản lý trên GitHub. Vui lòng đổi mật khẩu qua trang quản trị để cập nhật users.json.'
+        });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -486,7 +501,7 @@ app.post('/api/review/save', (req, res) => {
         try { payload = jwt.verify(token, JWT_SECRET); }
         catch (e) { return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn, vui lòng đăng nhập lại!' }); }
 
-        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
         const user = users.find(u => u.username === payload.username);
         if (!user || user.status === 'Inactive') return res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' });
 
@@ -939,7 +954,7 @@ function requireCdeAuth(req, res, next) {
             return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
         }
         const payload = jwt.verify(token, JWT_SECRET);
-        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
         const user = users.find(u => u.username === payload.username);
         if (!user || user.status === 'Inactive') {
             return res.status(401).json({ success: false, error: 'Tài khoản không hợp lệ hoặc đã bị khóa!' });
@@ -1959,7 +1974,7 @@ function authorizeManagedFolderOperation(req, res, itemPath, allowProjectRoot = 
         }
         try {
             const payload = jwt.verify(token, JWT_SECRET);
-            const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+            const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
             user = users.find(candidate => candidate.username === payload.username && candidate.status !== 'Inactive');
         } catch (error) {
             res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' });
@@ -2005,32 +2020,12 @@ function canUserAccessProject(user, projectName) {
     });
 }
 
-function updateAssignedProjectNames(oldName, newName) {
+function hasAssignedProject(projectName) {
     const normalize = value => String(value || '').replace(/\s+/g, '_').toLowerCase();
-    const oldKey = normalize(oldName);
-    const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
-    let changed = false;
-    users.forEach(user => {
-        if (typeof user.projects !== 'string') return;
-        let userChanged = false;
-        const projects = user.projects.split(',').map(project => {
-            if (normalize(project.trim()) !== oldKey) return project;
-            changed = true;
-            userChanged = true;
-            return project.replace(project.trim(), newName);
-        });
-        if (userChanged) user.projects = projects.join(',');
-    });
-    if (!changed) return;
-
-    const tmp = `${USER_FILE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    try {
-        fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
-        fs.renameSync(tmp, USER_FILE_PATH);
-    } catch (error) {
-        try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
-        throw error;
-    }
+    const projectKey = normalize(projectName);
+    const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+    return users.some(user => typeof user.projects === 'string' &&
+        user.projects.split(',').some(project => normalize(project.trim()) === projectKey));
 }
 
 function getProjectFromCdePath(filePath) {
@@ -2109,6 +2104,12 @@ app.post('/api/rename', requireCdeAuth, (req, res) => {
                 const isProjectRoot = relativeSegments.length === 1;
                 const target = authorizeManagedFolderOperation(req, res, itemPath, isProjectRoot);
                 if (!target) return;
+                if (isProjectRoot && hasAssignedProject(path.basename(oldFullPath))) {
+                    return res.status(409).json({
+                        success: false,
+                        error: 'Không thể đổi tên project trực tiếp vì danh sách phân quyền nằm trên GitHub. Hãy cập nhật projects trong trang quản trị trước.'
+                    });
+                }
                 oldFullPath = target.fullPath;
                 if (!isValidFolderName(newName)) return res.status(400).json({ success: false, error: 'Tên thư mục không hợp lệ.' });
                 const renamedPath = path.join(path.dirname(oldFullPath), newName.trim());
@@ -2117,12 +2118,6 @@ app.post('/api/rename', requireCdeAuth, (req, res) => {
                 }
                 renamedName = newName.trim();
                 renameDirectory(oldFullPath, renamedPath);
-                try {
-                    if (isProjectRoot) updateAssignedProjectNames(path.basename(oldFullPath), renamedName);
-                } catch (error) {
-                    renameDirectory(renamedPath, oldFullPath);
-                    throw error;
-                }
                 oldFullPath = renamedPath;
             } else {
                 fs.renameSync(oldFullPath, path.join(path.dirname(oldFullPath), renamedName));
@@ -2235,7 +2230,7 @@ function saveChatMessages() {
 function findChatUser(username) {
     if (!username || typeof username !== 'string') return null;
     try {
-        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8'));
+        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8'));
         const u = users.find(x => x.username === username);
         if (!u) return null;
         return {
@@ -2393,7 +2388,7 @@ function progAuth(req, res) {
     let payload;
     try { payload = jwt.verify(token, JWT_SECRET); }
     catch (e) { res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' }); return null; }
-    const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+    const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
     const user = users.find(u => u.username === payload.username);
     if (!user || user.status === 'Inactive') { res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' }); return null; }
     return user;
@@ -2606,6 +2601,18 @@ app.use('/vendor/web-ifc', express.static(path.join(__dirname, 'node_modules', '
 });
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
+refreshUsersCache().then(() => {
+    setInterval(() => {
+        refreshUsersCache().catch(error => {
+            console.error('[PV INCONS SERVER] Không đồng bộ được users.json từ frontend:', error.message);
+        });
+    }, 30000).unref();
+
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
+        console.log(`[PV INCONS SERVER] Nguồn users.json: ${USERS_JSON_URL}`);
+    });
+}).catch(error => {
+    console.error('[PV INCONS SERVER] Không thể khởi động vì không tải được users.json từ frontend:', error.message);
+    process.exit(1);
 });
