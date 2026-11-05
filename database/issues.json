@@ -1,0 +1,102 @@
+{
+  "database/bim-vdc/Project_01/02_SHARED/PROJECT_01-PVI-ZZ-ZZ-DR-A-0001.pdf": [
+    {
+      "text": "Đã kiểm tra thông tin dự án",
+      "time": "15:30:58 24/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    },
+    {
+      "text": "Kiểm tra hoàn thành công việc",
+      "time": "15:32:18 24/10/2026",
+      "author": "TRẦN HẠO MINH"
+    },
+    {
+      "text": "Hoàn thành thiết kế",
+      "time": "20:32:57 24/10/2026",
+      "author": "TRẦN HẠO MINH"
+    }
+  ],
+  "database/bim-vdc/Project_01/01_WIP/PROJECT_01-PVI-ZZ-ZZ-DR-A-0001.pdf": [
+    {
+      "text": "Làm mới dự án",
+      "time": "20:45:22 24/10/2026",
+      "author": "TRẦN HẠO MINH"
+    }
+  ],
+  "database/bim-vdc/Project 01/01_WIP/PROJECT_01-PVI-ZZ-ZZ-DR-A-0001.pdf": [
+    {
+      "text": "Lỗi dữ liệu",
+      "time": "11:33:13 27/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    }
+  ],
+  "database/bim-vdc/Project 02/02_SHARED/PROJECT_01-PVI-ZZ-ZZ-DR-A-0001.pdf": [
+    {
+      "text": "file đang sử dụng",
+      "time": "12:32:17 28/10/2026",
+      "author": "Administrator"
+    }
+  ],
+  "database/bim-vdc/Project 02/02_SHARED/Cp_One Home.pdf": [
+    {
+      "text": "Ký số thử",
+      "time": "20:30:39 31/10/2026",
+      "author": "Administrator"
+    },
+    {
+      "text": "Thử nghiệm",
+      "time": "17:33:20 4/11/2026",
+      "author": "Administrator"
+    }
+  ],
+  "database/bim-vdc/DHBK_CANTHO/01_WIP/260316-DH Bach Khoa-CD-KIEN TRUC.ifc": [
+    {
+      "text": "File test thử nghiệm",
+      "time": "20:30:44 26/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    },
+    {
+      "text": "Có thể bị lỗi",
+      "time": "10:24:20 27/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    }
+  ],
+  "database/bim-vdc/DHBK_CANTHO/02_SHARED/260316-DH Bach Khoa-CD-KIEN TRUC.ifc": [
+    {
+      "text": "[GATE 1 (WIP ➔ SHARED)] Đã phê duyệt",
+      "time": "10:26:38 27/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    },
+    {
+      "text": "Kiểm tra xong chưa",
+      "time": "10:32:01 27/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    },
+    {
+      "text": "[GATE 1 (WIP ➔ SHARED)] Đã kiểm tra xong",
+      "time": "10:32:11 27/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    }
+  ],
+  "database/bim-vdc/DHBK_CANTHO/03_PUBLISHED/260316-DH Bach Khoa-CD-KIEN TRUC.ifc": [
+    {
+      "text": "[GATE 2 (SHARED ➔ PUBLISHED)] Đã phê duyệt",
+      "time": "10:31:31 27/10/2026",
+      "author": "TRẦN HOÀNG PHƯỚC"
+    }
+  ],
+  "database/bim-vdc/@Sample Project/01_WIP/SAMPLE-PVI-ZZ-ZZ-CAL-S-0001.xlsx": [
+    {
+      "text": "Tải file về chỉnh sửa",
+      "time": "15:25:52 5/11/2026",
+      "author": "Administrator"
+    }
+  ],
+  "database/bim-vdc/@Sample Project/01_WIP/SAMPLE-PVI-ZZ-ZZ-M3-A-0001.rvt": [
+    {
+      "text": "Lấy link và chạy với phần mềm Revit 2027",
+      "time": "15:26:31 5/11/2026",
+      "author": "Administrator"
+    }
+  ]
+}

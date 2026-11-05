@@ -1,0 +1,129 @@
+{
+  "database/bim-vdc/Project 01/01_WIP/IFC_FINAL.ifc": {
+    "description": "Tài liệu chạy kiểm thử nghiệm",
+    "author": "Administrator",
+    "createdAt": "2026-11-01T12:19:56.488Z",
+    "updatedAt": "2026-11-03T07:51:17.151Z",
+    "status": "PENDING"
+  },
+  "database/bim-vdc/Project 01/01_WIP/IFC_OneHome.ifc": {
+    "title": "MẶT BẰNG TẦNG 1",
+    "description": "Theo chuẩn tiêu chuẩn ISO 19650 và thiết kế giao diện UI/UX tối ưu cho bảng quản lý tài liệu (CDE), bạn nên tách thành 3 cột riêng biệt (hoặc đặt lại tiêu đề gọn gàng nếu bắt buộc phải gộp chung trên giao diện hẹp).",
+    "author": "",
+    "createdAt": "2026-10-28T04:51:50.033Z",
+    "updatedAt": "2026-11-04T11:10:33.569Z",
+    "status": "PENDING",
+    "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/01_WIP/SAMPLE-PVI-ZZ-ZZ-M3-A-0001.rvt": {
+    "title": "REVIT KIẾN TRÚC DỰ ÁN TRƯỜNG TECHNICAL",
+    "description": "File Kiến trúc dự án đang triển khai thực hiện",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T04:21:58.682Z",
+    "updatedAt": "2026-11-05T04:23:13.834Z",
+    "status": "PENDING",
+    "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/01_WIP/SAMPLE-PVI-ZZ-ZZ-CAL-S-0001.xlsx": {
+    "title": "THÔNG TIN CÔNG TRÌNH",
+    "description": "File excel ghi chú các nội dung nhiệm vụ thiết kế, tải trọng tính toán và các vấn đề liên quan",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:01:56.372Z",
+    "updatedAt": "2026-11-05T07:01:56.372Z",
+    "status": "PENDING",
+    "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/02_SHARED/SAMPLE-PVI-ZZ-ZZ-RP-C-0001.pdf": {
+    "title": "BÁO CÁO PHỐI HỢP VA CHẠM",
+    "description": "Chi tiết các điểm va chạm điển hình (Mã va chạm, vị trí, tọa độ, mô tả sự cố, phương án khắc phục đề xuất & đơn vị chịu trách nhiệm).",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:15:49.360Z",
+    "updatedAt": "2026-11-05T07:16:54.332Z",
+    "status": "PENDING",
+    "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/02_SHARED/SAMPLE-PVI-ZZ-ZZ-M3-S-0001.ifc": {
+    "title": "IFC PHỐI HỢP VA CHẠM CLASH DETECTION",
+    "description": "Mô hình 3D kết cấu phối hợp kiểm tra va chạm với các bộ môn khác",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:25:53.989Z",
+    "updatedAt": "2026-11-05T07:25:53.989Z",
+    "status": "PENDING",
+    "suitability": "S1",
+    "discipline": "STR"
+  },
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-STR-ZZ-ZZ-DR-S-0001.pdf": {
+    "title": "BẢN VẼ KẾT CẤU",
+    "description": "Bản vẽ kết cấu hoàn thành đã được các bên kiểm duyệt và ký số xác thực",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:34:24.464Z",
+    "updatedAt": "2026-11-05T07:34:24.464Z",
+    "status": "APPROVED",
+    "suitability": "S4",
+    "discipline": "STR"
+  },
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-ARC-ZZ-ZZ-DR-A-0001.pdf": {
+    "title": "BẢN VẼ KIẾN TRÚC",
+    "description": "Bản vẽ kiến trúc hoàn thành đã được các bên kiểm duyệt và ký số xác thực",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:33:51.976Z",
+    "updatedAt": "2026-11-05T07:53:21.043Z",
+    "status": "APPROVED",
+    "suitability": "S4",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-PVI-ZZ-ZZ-BOQ-S-0001.xlsx": {
+    "title": "KHỐI LƯỢNG MỜI THẦU",
+    "description": "Bảng khối lượng mời thầu đã được thẩm định và phê duyệt từ Chủ đầu tư dự án",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:43:07.961Z",
+    "updatedAt": "2026-11-05T07:43:07.961Z",
+    "status": "APPROVED",
+    "suitability": "S4",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-PVI-ZZ-ZZ-RP-G-0001.pdf": {
+    "title": "CHỈ DẪN KỸ THUẬT VẬT LIỆU THI CÔNG",
+    "description": "Quy trình trình mẫu (Material Submittal), thử nghiệm nghiệm thu (Lab testing) và kiểm soát chất lượng đầu vào tại công trường.",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:44:49.362Z",
+    "updatedAt": "2026-11-05T07:46:14.853Z",
+    "status": "APPROVED",
+    "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/04_ARCHIVE/SAMPLE-PVI-ZZ-ZZ-ASB-A-REV01.rar": {
+    "title": "PHIÊN BẢN LƯU TRỮ REV01",
+    "description": "Tài liệu lưu trữ",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:50:54.462Z",
+    "updatedAt": "2026-11-05T07:50:54.462Z",
+    "status": "APPROVED",
+    "suitability": "A2",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/04_ARCHIVE/SAMPLE-PVI-ZZ-ZZ-ASB-A-REV02.rar": {
+    "title": "TÀI LIỆU LƯU TRỮ REV02",
+    "description": "Tài liệu lưu trữ hoàn thành",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T07:51:46.114Z",
+    "updatedAt": "2026-11-05T07:51:46.114Z",
+    "status": "APPROVED",
+    "suitability": "A2",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/01_WIP/SAMPLE-PVI-ZZ-ZZ-M3-S-0001.rvt": {
+    "title": "REVIT KẾT CẤU DỰ ÁN TRƯỜNG TECHNICAL",
+    "description": "File kết cấu dự án đang triển khai thực hiện",
+    "author": "Administrator",
+    "createdAt": "2026-11-05T08:21:45.538Z",
+    "updatedAt": "2026-11-05T08:22:54.150Z",
+    "status": "PENDING",
+    "suitability": "S0",
+    "discipline": "STR"
+  }
+}
