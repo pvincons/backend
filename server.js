@@ -719,6 +719,18 @@ function writeFileMetadataDB(db) {
     }
 }
 
+function updateFileMetadataTimestamp(filePath, timestamp = new Date().toISOString()) {
+    const key = normRecallKey(filePath);
+    const db = readFileMetadataDB();
+    const metadata = db[key] || {};
+    const relativePath = key.replace(/^database\/bim-vdc\/?/, '');
+    const fullPath = path.resolve(ROOT_DIR, relativePath);
+    const createdAt = metadata.createdAt || fs.statSync(fullPath).birthtime.toISOString();
+    const updatedAt = new Date(Math.max(Date.parse(timestamp) || Date.now(), Date.parse(createdAt) || 0)).toISOString();
+    db[key] = { ...metadata, createdAt, updatedAt };
+    if (!writeFileMetadataDB(db)) throw new Error('Không thể lưu ngày cập nhật tệp.');
+}
+
 function rekeyFileMetadata(oldPath, newPath) {
     const oldKey = normRecallKey(oldPath);
     const newKey = normRecallKey(newPath);
@@ -898,6 +910,13 @@ function requireCdeAuth(req, res, next) {
     } catch (error) {
         return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' });
     }
+}
+
+function requireDataFullControl(req, res, next) {
+    if (!canUserManageAllData(req.authUser)) {
+        return res.status(403).json({ success: false, error: 'Chỉ Admin hoặc Master mới có toàn quyền thao tác trên dữ liệu CDE.' });
+    }
+    next();
 }
 
 // 10.1. API Đăng nhập / Lấy Access Token VNPT SmartCA (OAuth2)
@@ -1320,6 +1339,7 @@ async function finalizeVnptSignature(tranId, tx, content, user) {
             embedded,
             mode: tx.mode
         });
+        updateFileMetadataTimestamp(tx.filePath);
         updateSignTx(tranId, { done: true, embedded, completedAt: Date.now() });
         removePendingFile(tx);
         if (finalOutput) fs.rmSync(stagedOutputPath, { force: true });
@@ -1594,6 +1614,10 @@ const upload = multer({
     storage,
     fileFilter: (req, file, cb) => {
         const targetPath = req.query.path || req.body.targetPath || req.body.targetFolder || '';
+        const projectName = getProjectFromCdePath(targetPath);
+        if (!canUserAccessProject(req.authUser, projectName)) {
+            return cb(new Error('Bạn không được phân công tham gia dự án tải tệp lên.'));
+        }
         if (!canUserUploadInZone(req.authUser, getZoneFromPath(targetPath))) {
             return cb(new Error('Bạn không có quyền tải tệp lên khu vực này.'));
         }
@@ -1605,14 +1629,19 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'CDE & Auth Backend Server đang hoạt động ổn định!' });
 });
 
-app.get('/api/files', (req, res) => {
+app.get('/api/files', requireCdeAuth, (req, res) => {
     try {
         const subPath = (req.query.path || '').replace(/^database\/bim-vdc\/?/, '');
+        const requestedProject = getProjectFromCdePath(subPath);
+        if (requestedProject && !canUserAccessProject(req.authUser, requestedProject)) {
+            return res.status(403).json({ error: 'Bạn không được phân công tham gia dự án này.' });
+        }
         const targetDir = path.join(ROOT_DIR, subPath);
         if (!fs.existsSync(targetDir)) return res.status(404).json({ error: 'Thư mục không tồn tại' });
         const metadataDB = readFileMetadataDB();
         const items = fs.readdirSync(targetDir, { withFileTypes: true });
-        res.json(items.map(item => {
+        const visibleItems = items.filter(item => subPath || canUserAccessProject(req.authUser, item.name));
+        res.json(visibleItems.map(item => {
             const fullPath = path.join(targetDir, item.name);
             let size = 0;
             let stats = null;
@@ -1627,7 +1656,10 @@ app.get('/api/files', (req, res) => {
             const itemPath = 'database/bim-vdc/' + path.join(subPath, item.name).replace(/\\/g, '/');
             const metadata = metadataDB[normRecallKey(itemPath)] || {};
             const fileUpdatedAt = stats ? stats.mtime.toISOString() : '';
-            const metadataUpdatedAt = metadata.updatedAt || '';
+            const createdAt = metadata.createdAt || (stats ? stats.birthtime.toISOString() : '');
+            const updatedAt = [metadata.updatedAt, fileUpdatedAt, createdAt]
+                .filter(value => value && Number.isFinite(Date.parse(value)))
+                .reduce((latest, value) => !latest || Date.parse(value) > Date.parse(latest) ? value : latest, '');
             return {
                 name: item.name,
                 isDirectory: item.isDirectory(),
@@ -1638,10 +1670,8 @@ app.get('/api/files', (req, res) => {
                     title: (metadata.title || '').toLocaleUpperCase('vi-VN'),
                     description: metadata.description || '',
                     author: metadata.author || '',
-                    createdAt: metadata.createdAt || (stats ? stats.birthtime.toISOString() : ''),
-                    updatedAt: metadataUpdatedAt && (!fileUpdatedAt || Date.parse(metadataUpdatedAt) > Date.parse(fileUpdatedAt))
-                        ? metadataUpdatedAt
-                        : fileUpdatedAt,
+                    createdAt,
+                    updatedAt,
                     status: metadata.status || 'PENDING',
                     suitability: metadata.suitability || '',
                     discipline: metadata.discipline || ''
@@ -1664,6 +1694,9 @@ app.post('/api/file-metadata', requireCdeAuth, (req, res) => {
             return res.status(400).json({ success: false, error: 'Mô tả tối đa 2000 ký tự.' });
         }
         const normalizedPath = normRecallKey(filePath);
+        if (!canUserAccessProject(req.authUser, getProjectFromCdePath(normalizedPath))) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án chứa tài liệu này.' });
+        }
         const relativePath = normalizedPath.replace(/^database\/bim-vdc\/?/, '');
         const fullPath = path.resolve(ROOT_DIR, relativePath);
         const rootPath = path.resolve(ROOT_DIR);
@@ -1690,13 +1723,14 @@ app.post('/api/file-metadata', requireCdeAuth, (req, res) => {
 
         const db = readFileMetadataDB();
         const previous = db[normalizedPath] || {};
-        const now = new Date().toISOString();
+        const createdAt = previous.createdAt || fs.statSync(fullPath).birthtime.toISOString();
+        const updatedAt = new Date(Math.max(Date.now(), Date.parse(createdAt) || 0)).toISOString();
         const metadata = {
             title: title === undefined ? (previous.title || '').toLocaleUpperCase('vi-VN') : title.trim().toLocaleUpperCase('vi-VN'),
             description: description.trim(),
             author: previous.author || '',
-            createdAt: previous.createdAt || fs.statSync(fullPath).birthtime.toISOString(),
-            updatedAt: now,
+            createdAt,
+            updatedAt,
             status,
             suitability: suitability || previous.suitability || '',
             discipline: typeof discipline === 'string' ? discipline.trim() : previous.discipline || ''
@@ -1711,7 +1745,7 @@ app.post('/api/file-metadata', requireCdeAuth, (req, res) => {
     }
 });
 
-app.get('/api/cde-files', (req, res) => {
+app.get('/api/cde-files', requireCdeAuth, (req, res) => {
     try {
         const metadataDB = readFileMetadataDB();
         function walkDir(dir, fileList = []) {
@@ -1731,7 +1765,10 @@ app.get('/api/cde-files', (req, res) => {
                 const itemPath = 'database/' + relPath;
                 const metadata = metadataDB[normRecallKey(itemPath)] || {};
                 const fileUpdatedAt = stats ? stats.mtime.toISOString() : '';
-                const metadataUpdatedAt = metadata.updatedAt || '';
+                const createdAt = metadata.createdAt || (stats ? stats.birthtime.toISOString() : '');
+                const updatedAt = [metadata.updatedAt, fileUpdatedAt, createdAt]
+                    .filter(value => value && Number.isFinite(Date.parse(value)))
+                    .reduce((latest, value) => !latest || Date.parse(value) > Date.parse(latest) ? value : latest, '');
                 fileList.push({
                     name: file.name,
                     path: itemPath,
@@ -1741,10 +1778,8 @@ app.get('/api/cde-files', (req, res) => {
                         title: (metadata.title || '').toLocaleUpperCase('vi-VN'),
                         description: metadata.description || '',
                         author: metadata.author || '',
-                        createdAt: metadata.createdAt || (stats ? stats.birthtime.toISOString() : ''),
-                        updatedAt: metadataUpdatedAt && (!fileUpdatedAt || Date.parse(metadataUpdatedAt) > Date.parse(fileUpdatedAt))
-                            ? metadataUpdatedAt
-                            : fileUpdatedAt,
+                        createdAt,
+                        updatedAt,
                         status: metadata.status || 'PENDING',
                         suitability: metadata.suitability || '',
                         discipline: metadata.discipline || ''
@@ -1754,7 +1789,10 @@ app.get('/api/cde-files', (req, res) => {
             });
             return fileList;
         }
-        res.json(walkDir(ROOT_DIR));
+        res.json(walkDir(ROOT_DIR).filter(item => canUserAccessProject(
+            req.authUser,
+            getProjectFromCdePath(item.path)
+        )));
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1786,14 +1824,13 @@ app.post('/api/upload', requireCdeAuth, (req, res) => {
                 const relativePath = path.relative(ROOT_DIR, file.path).replace(/\\/g, '/');
                 const metadataPath = normRecallKey(`database/bim-vdc/${relativePath}`);
                 const previous = metadataDB[metadataPath] || {};
-                const stats = fs.statSync(file.path);
                 metadataDB[metadataPath] = {
                     ...previous,
                     title: title.trim().toLocaleUpperCase('vi-VN'),
                     description: description.trim(),
                     author: req.authUser.fullName || req.authUser.username,
-                    createdAt: previous.createdAt || stats.birthtime.toISOString(),
-                    updatedAt: uploadedAt,
+                    createdAt: previous.createdAt || uploadedAt,
+                    updatedAt: new Date(Math.max(Date.parse(uploadedAt), Date.parse(previous.createdAt) || 0)).toISOString(),
                     status,
                     suitability,
                     discipline
@@ -1809,26 +1846,198 @@ app.post('/api/upload', requireCdeAuth, (req, res) => {
     });
 });
 
-app.post('/api/create-folder', (req, res) => {
+app.post('/api/create-folder', requireCdeAuth, (req, res) => {
     try {
-        const { parentPath, folderName } = req.body;
-        const targetDir = path.join(ROOT_DIR, (parentPath || 'database/bim-vdc').replace(/^database\/bim-vdc\/?/, ''), folderName);
-        if (!fs.existsSync(targetDir)) {
-            fs.mkdirSync(targetDir, { recursive: true });
-            res.json({ success: true, message: 'Tạo thư mục thành công!' });
-        } else {
-            res.status(400).json({ success: false, error: 'Thư mục đã tồn tại!' });
+        const { parentPath, folderName } = req.body || {};
+        const parent = getManagedFolderTarget(req.authUser, parentPath, true);
+        if (!parent) return res.status(403).json({ success: false, error: 'Chỉ Full Control mới được tạo thư mục trong container.' });
+        if (!isValidFolderName(folderName)) return res.status(400).json({ success: false, error: 'Tên thư mục không hợp lệ.' });
+        if (!fs.existsSync(parent.fullPath) || !fs.statSync(parent.fullPath).isDirectory()) {
+            return res.status(404).json({ success: false, error: 'Thư mục cha không tồn tại.' });
         }
+        const targetDir = path.join(parent.fullPath, folderName.trim());
+        if (fs.existsSync(targetDir)) return res.status(400).json({ success: false, error: 'Thư mục đã tồn tại.' });
+        fs.mkdirSync(targetDir);
+        res.json({ success: true, message: 'Tạo thư mục thành công!' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.post('/api/rename', (req, res) => {
+function getManagedFolderTarget(user, itemPath, allowContainer = false) {
+    if (typeof itemPath !== 'string') return null;
+    const normalizedPath = itemPath.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!/^database\/bim-vdc(?:\/|$)/i.test(normalizedPath)) return null;
+    const relativePath = normalizedPath.replace(/^database\/bim-vdc\/?/i, '').replace(/\/+$/, '');
+    const segments = relativePath ? relativePath.split('/') : [];
+    if (segments.some(segment => !segment || segment === '.' || segment === '..')) return null;
+    const fullPath = path.resolve(ROOT_DIR, ...segments);
+    const rootPath = path.resolve(ROOT_DIR);
+    if (fullPath !== rootPath && !fullPath.startsWith(rootPath + path.sep)) return null;
+
+    if (canUserManageAllData(user)) {
+        if (fullPath === rootPath && !allowContainer) return null;
+        return { fullPath, container: null };
+    }
+
+    if (!canUserAccessProject(user, segments[0])) return null;
+    if (allowContainer && segments.length === 1) return { fullPath, container: null };
+    const container = (segments[1] || '').toUpperCase();
+    if (segments.length < (allowContainer ? 2 : 3) ||
+        !['01_WIP', '02_SHARED', '03_PUBLISHED', '04_ARCHIVE'].includes(container)) return null;
+    if (!canUserManageContainer(user, container)) return null;
+    return { fullPath, container };
+}
+
+function authorizeManagedFolderOperation(req, res, itemPath, allowProjectRoot = false) {
+    let user = req.authUser;
+    if (!user) {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        if (!token) {
+            res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
+            return null;
+        }
+        try {
+            const payload = jwt.verify(token, JWT_SECRET);
+            const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+            user = users.find(candidate => candidate.username === payload.username && candidate.status !== 'Inactive');
+        } catch (error) {
+            res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' });
+            return null;
+        }
+        if (!user) {
+            res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' });
+            return null;
+        }
+    }
+    const target = getManagedFolderTarget(user, itemPath, allowProjectRoot);
+    if (!target) {
+        res.status(403).json({ success: false, error: 'Chỉ Full Control mới được quản lý thư mục con trong container.' });
+        return null;
+    }
+    return target;
+}
+
+function canUserManageContainer(user, container) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    if (permission === 'ADMIN' || role === 'ADMIN') return true;
+    return (REVIEW_ZONE_ACCESS[permission] || REVIEW_ZONE_ACCESS[role] || {})[container] === 'FULL CONTROL';
+}
+
+function canUserManageAllData(user) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    return role === 'ADMIN' || permission === 'ADMIN';
+}
+
+function canUserAccessProject(user, projectName) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    if (role === 'ADMIN' || permission === 'ADMIN') return true;
+    const normalize = value => String(value || '').replace(/\s+/g, '_').toLowerCase();
+    const projectKey = normalize(projectName);
+    if (!projectKey) return false;
+    const assignedProjects = typeof user.projects === 'string' ? user.projects.split(',') : [];
+    return assignedProjects.some(project => {
+        const key = normalize(project.trim());
+        return key && key !== 'all' && key !== normalize('Tất cả dự án') && key === projectKey;
+    });
+}
+
+function updateAssignedProjectNames(oldName, newName) {
+    const normalize = value => String(value || '').replace(/\s+/g, '_').toLowerCase();
+    const oldKey = normalize(oldName);
+    const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
+    let changed = false;
+    users.forEach(user => {
+        if (typeof user.projects !== 'string') return;
+        let userChanged = false;
+        const projects = user.projects.split(',').map(project => {
+            if (normalize(project.trim()) !== oldKey) return project;
+            changed = true;
+            userChanged = true;
+            return project.replace(project.trim(), newName);
+        });
+        if (userChanged) user.projects = projects.join(',');
+    });
+    if (!changed) return;
+
+    const tmp = `${USER_FILE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
+        fs.renameSync(tmp, USER_FILE_PATH);
+    } catch (error) {
+        try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+        throw error;
+    }
+}
+
+function getProjectFromCdePath(filePath) {
+    const parts = String(filePath || '').replace(/\\/g, '/').replace(/^database\/bim-vdc\/?/i, '').split('/');
+    return parts[0] || '';
+}
+
+function isValidFolderName(name) {
+    return typeof name === 'string' && !!name.trim() &&
+        name.trim() !== '.' && name.trim() !== '..' &&
+        !/[<>:"/\\|?*\x00-\x1f]/.test(name.trim()) &&
+        !/[. ]$/.test(name.trim());
+}
+
+function renameDirectory(sourcePath, targetPath) {
+    try {
+        fs.renameSync(sourcePath, targetPath);
+    } catch (error) {
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) {
+            throw error;
+        }
+
+        fs.cpSync(sourcePath, targetPath, { recursive: true, errorOnExist: true, force: false });
+        try {
+            fs.rmSync(sourcePath, { recursive: true });
+        } catch (removeError) {
+            try { fs.rmSync(targetPath, { recursive: true, force: true }); } catch (cleanupError) { /* preserve remove error */ }
+            throw removeError;
+        }
+    }
+}
+
+app.post('/api/rename', requireCdeAuth, (req, res) => {
     try {
         const { path: itemPath, newName } = req.body;
-        const oldFullPath = path.join(ROOT_DIR, itemPath.replace(/^database\/bim-vdc\/?/, ''));
+        if (!canUserAccessProject(req.authUser, getProjectFromCdePath(itemPath))) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+        }
+        let oldFullPath = path.join(ROOT_DIR, itemPath.replace(/^database\/bim-vdc\/?/, ''));
+        let renamedName = newName;
         if (fs.existsSync(oldFullPath)) {
-            fs.renameSync(oldFullPath, path.join(path.dirname(oldFullPath), newName));
-            const renamedKey = path.posix.join(path.posix.dirname(normRecallKey(itemPath)), newName);
+            if (fs.statSync(oldFullPath).isDirectory()) {
+                const relativeSegments = normRecallKey(itemPath)
+                    .replace(/^database\/bim-vdc\/?/, '')
+                    .split('/')
+                    .filter(Boolean);
+                const isProjectRoot = relativeSegments.length === 1;
+                const target = authorizeManagedFolderOperation(req, res, itemPath, isProjectRoot);
+                if (!target) return;
+                oldFullPath = target.fullPath;
+                if (!isValidFolderName(newName)) return res.status(400).json({ success: false, error: 'Tên thư mục không hợp lệ.' });
+                const renamedPath = path.join(path.dirname(oldFullPath), newName.trim());
+                if (fs.existsSync(renamedPath)) {
+                    return res.status(400).json({ success: false, error: 'Tên thư mục đã tồn tại.' });
+                }
+                renamedName = newName.trim();
+                renameDirectory(oldFullPath, renamedPath);
+                try {
+                    if (isProjectRoot) updateAssignedProjectNames(path.basename(oldFullPath), renamedName);
+                } catch (error) {
+                    renameDirectory(renamedPath, oldFullPath);
+                    throw error;
+                }
+                oldFullPath = renamedPath;
+            } else {
+                fs.renameSync(oldFullPath, path.join(path.dirname(oldFullPath), renamedName));
+            }
+            const renamedKey = path.posix.join(path.posix.dirname(normRecallKey(itemPath)), renamedName);
             rekeyRecalls(itemPath, renamedKey);
             rekeyIssues(itemPath, renamedKey);
             rekeyFileMetadata(itemPath, renamedKey);
@@ -1839,10 +2048,18 @@ app.post('/api/rename', (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.post('/api/delete', (req, res) => {
+app.post('/api/delete', requireCdeAuth, (req, res) => {
     try {
-        const fullPath = path.join(ROOT_DIR, req.body.path.replace(/^database\/bim-vdc\/?/, ''));
+        if (!canUserAccessProject(req.authUser, getProjectFromCdePath(req.body && req.body.path))) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+        }
+        let fullPath = path.join(ROOT_DIR, req.body.path.replace(/^database\/bim-vdc\/?/, ''));
         if (fs.existsSync(fullPath)) {
+            if (fs.statSync(fullPath).isDirectory()) {
+                const target = authorizeManagedFolderOperation(req, res, req.body.path);
+                if (!target) return;
+                fullPath = target.fullPath;
+            }
             fs.rmSync(fullPath, { recursive: true, force: true });
             removeRecalls(req.body.path);
             removeIssues(req.body.path);
@@ -1854,9 +2071,13 @@ app.post('/api/delete', (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.post('/api/move', (req, res) => {
+app.post('/api/move', requireCdeAuth, (req, res) => {
     try {
         const { sourcePath, targetDir } = req.body;
+        if (!canUserAccessProject(req.authUser, getProjectFromCdePath(sourcePath)) ||
+            !canUserAccessProject(req.authUser, getProjectFromCdePath(targetDir))) {
+            return res.status(403).json({ success: false, error: 'Bạn chỉ được di chuyển mục trong các dự án được phân công.' });
+        }
         const srcFullPath = path.join(ROOT_DIR, sourcePath.replace(/^database\/bim-vdc\/?/, ''));
         const destParent = path.join(ROOT_DIR, targetDir.replace(/^database\/bim-vdc\/?/, ''));
         if (!fs.existsSync(srcFullPath)) return res.status(404).json({ success: false, error: 'Nguồn không tồn tại!' });
@@ -1873,9 +2094,13 @@ app.post('/api/move', (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.post('/api/copy', (req, res) => {
+app.post('/api/copy', requireCdeAuth, (req, res) => {
     try {
         const { sourcePath, targetDir } = req.body;
+        if (!canUserAccessProject(req.authUser, getProjectFromCdePath(sourcePath)) ||
+            !canUserAccessProject(req.authUser, getProjectFromCdePath(targetDir))) {
+            return res.status(403).json({ success: false, error: 'Bạn chỉ được sao chép mục trong các dự án được phân công.' });
+        }
         const srcFullPath = path.join(ROOT_DIR, sourcePath.replace(/^database\/bim-vdc\/?/, ''));
         const destParent = path.join(ROOT_DIR, targetDir.replace(/^database\/bim-vdc\/?/, ''));
         if (!fs.existsSync(srcFullPath)) return res.status(404).json({ success: false, error: 'Nguồn không tồn tại!' });
@@ -2021,15 +2246,18 @@ app.post('/api/chat/send', (req, res) => {
 // 13. API tạo mới dự án và tự động sinh 4 thư mục chuẩn ISO 19650
 // ===============================================================
 
-app.post('/api/create-project', (req, res) => {
+app.post('/api/create-project', requireCdeAuth, requireDataFullControl, (req, res) => {
     try {
-        const { parentPath, projectName } = req.body;
-        if (!projectName || !String(projectName).trim()) {
+        const { parentPath = 'database/bim-vdc', projectName } = req.body || {};
+        if (!isValidFolderName(projectName)) {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập tên dự án mới!' });
         }
 
-        const cleanParent = (parentPath || 'database/bim-vdc').replace(/^database\/bim-vdc\/?/, '');
-        const projectRootPath = path.join(ROOT_DIR, cleanParent, projectName.trim());
+        const parent = getManagedFolderTarget(req.authUser, parentPath, true);
+        if (!parent || !fs.existsSync(parent.fullPath) || !fs.statSync(parent.fullPath).isDirectory()) {
+            return res.status(400).json({ success: false, error: 'Thư mục cha không hợp lệ hoặc không tồn tại.' });
+        }
+        const projectRootPath = path.join(parent.fullPath, projectName.trim());
 
         // Kiểm tra xem thư mục dự án đã tồn tại chưa
         if (fs.existsSync(projectRootPath)) {
@@ -2046,7 +2274,7 @@ app.post('/api/create-project', (req, res) => {
 
         res.json({ 
             success: true, 
-            message: `Đã tạo dự án "${projectName.trim()}" kèm 4 thư mục chuẩn ISO 19650 thành công!` 
+            message: `Đã tạo dự án "${projectName.trim()}" kèm 4 thư mục chuẩn ISO 19650 thành công!`
         });
     } catch (error) { 
         res.status(500).json({ success: false, error: error.message }); 
@@ -2080,10 +2308,10 @@ function progAuth(req, res) {
     if (!user || user.status === 'Inactive') { res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' }); return null; }
     return user;
 }
-function progModel(res, filePath) {
+function progModel(res, filePath, mustExist = true) {
     const rel = String(filePath || '').replace(/\\/g, '/').replace(/^database\/bim-vdc\/?/, '').replace(/^\/+/, '');
     const full = path.resolve(ROOT_DIR, rel);
-    if (!rel || !full.startsWith(ROOT_DIR + path.sep) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
+    if (!rel || !full.startsWith(ROOT_DIR + path.sep) || (mustExist && (!fs.existsSync(full) || !fs.statSync(full).isFile()))) {
         res.status(400).json({ success: false, error: 'Đường dẫn mô hình không hợp lệ hoặc không tồn tại!' }); return null;
     }
     return { rel, container: getContainerFromPath(rel) };
@@ -2154,6 +2382,99 @@ app.get('/api/progress/audit', (req, res) => {
         const m = progModel(res, req.query.file); if (!m) return;
         if (!canUserWriteReview(user, m.container)) return res.status(403).json({ success: false, error: 'Không đủ quyền xem nhật ký!' });
         res.json({ success: true, log: progRead(PROGRESS_AUDIT_PATH, []).filter(x => x.file === m.rel).slice(-200).reverse() });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// --- 9B.2 Chuyển dữ liệu giữa các revision + ảnh hiện trường gắn cấu kiện ---
+const PROG_PHOTO_DIR = path.join(BASE_DATABASE_DIR, 'construction_files', 'element_photos');
+const PROG_PHOTO_URL = /^\/api\/progress\/photo\/([0-9a-f]{16})\/([0-9a-f]{16})$/;
+const progHash = rel => crypto.createHash('sha256').update(rel).digest('hex').slice(0, 16);
+function progStem(p) {
+    return path.posix.basename(p).replace(/\.[^.]+$/, '').toLowerCase().replace(/[-_ .]?(p|c|r|rev|v)\d{1,3}\b/g, '').replace(/[-_ .]+/g, '');
+}
+function progAudit(entry) {
+    const log = progRead(PROGRESS_AUDIT_PATH, []);
+    log.push({ at: new Date().toISOString(), ...entry });
+    progWrite(PROGRESS_AUDIT_PATH, log.slice(-5000));
+}
+
+app.get('/api/progress/related', (req, res) => {
+    try {
+        const user = progAuth(req, res); if (!user) return;
+        const m = progModel(res, req.query.file); if (!m) return;
+        if (!canUserReadModel(user, m.container)) return res.status(403).json({ success: false, error: 'Không đủ quyền!' });
+        const dir = path.posix.dirname(m.rel), stem = progStem(m.rel);
+        const items = Object.entries(progRead(PROGRESS_FILE_PATH, {}))
+            .filter(([k, v]) => k !== m.rel && v && v.items && Object.keys(v.items).length
+                && canUserReadModel(user, getContainerFromPath(k))
+                && (path.posix.dirname(k) === dir || progStem(k) === stem))
+            .map(([k, v]) => ({ file: k, count: Object.keys(v.items).length, updatedAt: v.updatedAt || null }))
+            .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 20);
+        res.json({ success: true, items });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post('/api/progress/copy', (req, res) => {
+    const user = progAuth(req, res); if (!user) return;
+    const to = progModel(res, req.body && req.body.to); if (!to) return;
+    const from = progModel(res, req.body && req.body.from, false); if (!from) return;
+    if (!canUserWriteReview(user, to.container)) return res.status(403).json({ success: false, error: 'Bạn cần quyền ghi trên mô hình đích!' });
+    if (!canUserReadModel(user, from.container)) return res.status(403).json({ success: false, error: 'Bạn không có quyền xem mô hình nguồn!' });
+    const overwrite = req.body.overwrite === true;
+    progressQueue = progressQueue.then(() => {
+        const all = progRead(PROGRESS_FILE_PATH, {});
+        const src = (all[from.rel] || {}).items || {};
+        const rec = all[to.rel] || { items: {} };
+        const by = user.fullName || user.username, at = new Date().toISOString(), th = progHash(to.rel);
+        const mv = u => {
+            const mm = PROG_PHOTO_URL.exec(u);
+            if (!mm) return u;
+            const f = path.join(PROG_PHOTO_DIR, mm[1], mm[2] + '.jpg');
+            if (!fs.existsSync(f)) return null;
+            const id = crypto.randomBytes(8).toString('hex'), dir = path.join(PROG_PHOTO_DIR, th);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, '_model.txt'), to.rel, 'utf8');
+            fs.copyFileSync(f, path.join(dir, id + '.jpg'));
+            return `/api/progress/photo/${th}/${id}`;
+        };
+        let copied = 0, skipped = 0;
+        for (const [g, d] of Object.entries(src)) {
+            if (rec.items[g] && !overwrite) { skipped++; continue; }
+            rec.items[g] = { ...d, photos: (d.photos || []).map(mv).filter(Boolean), by, at, from: from.rel };
+            copied++;
+        }
+        rec.updatedAt = at; all[to.rel] = rec; progWrite(PROGRESS_FILE_PATH, all);
+        progAudit({ user: user.username, name: by, file: to.rel, saved: copied, deleted: 0, copiedFrom: from.rel });
+        res.json({ success: true, copied, skipped });
+    }).catch(error => { if (!res.headersSent) res.status(500).json({ success: false, error: error.message }); });
+});
+
+app.post('/api/progress/photo', express.raw({ type: 'image/jpeg', limit: '6mb' }), (req, res) => {
+    try {
+        const user = progAuth(req, res); if (!user) return;
+        const m = progModel(res, req.query.file); if (!m) return;
+        if (!canUserWriteReview(user, m.container)) return res.status(403).json({ success: false, error: 'Bạn cần quyền ghi để tải ảnh lên!' });
+        const b = req.body;
+        if (!Buffer.isBuffer(b) || b.length < 1000 || b[0] !== 0xFF || b[1] !== 0xD8 || b[2] !== 0xFF) return res.status(400).json({ success: false, error: 'Chỉ nhận ảnh JPEG hợp lệ (tối đa 6 MB)!' });
+        const h = progHash(m.rel), id = crypto.randomBytes(8).toString('hex'), dir = path.join(PROG_PHOTO_DIR, h);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, '_model.txt'), m.rel, 'utf8');
+        fs.writeFileSync(path.join(dir, id + '.jpg'), b);
+        res.json({ success: true, url: `/api/progress/photo/${h}/${id}` });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.get('/api/progress/photo/:h/:id', (req, res) => {
+    try {
+        const user = progAuth(req, res); if (!user) return;
+        const { h, id } = req.params;
+        if (!/^[0-9a-f]{16}$/.test(h) || !/^[0-9a-f]{16}$/.test(id)) return res.status(400).json({ success: false, error: 'Tham số không hợp lệ!' });
+        const dir = path.join(PROG_PHOTO_DIR, h), f = path.join(dir, id + '.jpg');
+        if (!fs.existsSync(f) || !fs.existsSync(path.join(dir, '_model.txt'))) return res.status(404).json({ success: false, error: 'Không tìm thấy ảnh!' });
+        const rel = fs.readFileSync(path.join(dir, '_model.txt'), 'utf8').trim();
+        if (!canUserReadModel(user, getContainerFromPath(rel))) return res.status(403).json({ success: false, error: 'Không đủ quyền xem ảnh!' });
+        res.setHeader('Cache-Control', 'private, max-age=86400');
+        res.type('image/jpeg').sendFile(f);
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
