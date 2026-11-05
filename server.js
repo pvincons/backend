@@ -281,31 +281,70 @@ function removeIssues(targetPath) {
     if (changed) writeIssuesDB(db);
 }
 
-app.get('/api/issues', (req, res) => {
-    try { res.json(readIssuesDB()); } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+app.get('/api/issues', requireCdeAuth, (req, res) => {
+    try {
+        const issues = readIssuesDB();
+        res.json(Object.fromEntries(Object.entries(issues).filter(([filePath]) =>
+            canUserAccessProject(req.authUser, getProjectFromCdePath(filePath))
+        )));
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.post('/api/issues/add', (req, res) => {
+app.post('/api/issues/add', requireCdeAuth, (req, res) => {
     try {
-        const { filePath, text, author } = req.body;
-        if (!filePath || !text) return res.status(400).json({ success: false, error: 'Thiếu thông tin!' });
+        const { filePath, text } = req.body || {};
+        if (typeof filePath !== 'string' || typeof text !== 'string' || !text.trim()) {
+            return res.status(400).json({ success: false, error: 'Thiếu thông tin!' });
+        }
+        const target = resolveCdeFilePath(filePath);
+        if (!target) return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+        if (!canUserAccessProject(req.authUser, target.projectName)) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+        }
+        if (!fs.existsSync(target.fullPath) || !fs.statSync(target.fullPath).isFile()) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy tệp.' });
+        }
         const db = readIssuesDB();
-        if (!db[filePath]) db[filePath] = [];
-        db[filePath].push({ text: text.trim(), time: new Date().toLocaleString('vi-VN'), author: author || 'Phương Vy' });
-        if (writeIssuesDB(db)) res.json({ success: true, message: 'Đã lưu Issue!', issues: db[filePath] });
+        if (!db[target.key]) db[target.key] = [];
+        db[target.key].push({
+            text: text.trim(),
+            time: new Date().toLocaleString('vi-VN'),
+            author: req.authUser.fullName || req.authUser.username,
+            username: req.authUser.username
+        });
+        if (writeIssuesDB(db)) res.json({ success: true, message: 'Đã lưu Issue!', issues: db[target.key] });
         else res.status(500).json({ success: false, error: 'Không thể ghi file' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.post('/api/issues/delete', (req, res) => {
+app.post('/api/issues/delete', requireCdeAuth, (req, res) => {
     try {
-        const { filePath, index } = req.body;
+        const { filePath, index } = req.body || {};
+        if (typeof filePath !== 'string' || !Number.isInteger(index) || index < 0) {
+            return res.status(400).json({ success: false, error: 'Thông tin Issue không hợp lệ.' });
+        }
+        const target = resolveCdeFilePath(filePath);
+        if (!target) return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+        if (!canUserAccessProject(req.authUser, target.projectName)) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+        }
         const db = readIssuesDB();
-        if (db[filePath] && typeof db[filePath][index] !== 'undefined') {
-            db[filePath].splice(index, 1);
-            if (db[filePath].length === 0) delete db[filePath];
-            writeIssuesDB(db);
-            return res.json({ success: true, message: 'Đã xóa Issue!', issues: db[filePath] || [] });
+        const issues = db[target.key];
+        if (issues && typeof issues[index] !== 'undefined') {
+            const issue = issues[index];
+            const isAdmin = ['ADMIN'].includes(String(req.authUser.role || '').toUpperCase()) ||
+                ['ADMIN'].includes(String(req.authUser.permission || '').toUpperCase());
+            const isAuthor = issue.username
+                ? issue.username === req.authUser.username
+                : String(issue.author || '').trim().toLowerCase() ===
+                    String(req.authUser.fullName || req.authUser.username).trim().toLowerCase();
+            if (!isAdmin && !isAuthor) {
+                return res.status(403).json({ success: false, error: 'Bạn chỉ có thể xóa Issue do mình tạo.' });
+            }
+            issues.splice(index, 1);
+            if (issues.length === 0) delete db[target.key];
+            if (!writeIssuesDB(db)) return res.status(500).json({ success: false, error: 'Không thể ghi file' });
+            return res.json({ success: true, message: 'Đã xóa Issue!', issues: db[target.key] || [] });
         }
         res.status(404).json({ success: false, error: 'Không tìm thấy Issue!' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
@@ -392,25 +431,19 @@ function canUserUploadInZone(user, zone) {
 }
 
 function requireUploadPermission(req, res, next) {
-    try {
-        const authHeader = req.headers.authorization || '';
-        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-        if (!token) return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
-
-        let payload;
-        try { payload = jwt.verify(token, JWT_SECRET); }
-        catch (e) { return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn, vui lòng đăng nhập lại!' }); }
-
-        const users = JSON.parse(fs.readFileSync(USER_FILE_PATH, 'utf8') || '[]');
-        const user = users.find(u => u.username === payload.username);
-        if (!user) return res.status(401).json({ success: false, error: 'Tài khoản không tồn tại!' });
-
-        if (!canUserUploadInZone(user, getZoneFromPath(req.body && req.body.filePath))) {
-            return res.status(403).json({ success: false, error: 'Chỉ người có quyền tải file lên (Read & Write) mới được thu hồi tệp tin này!' });
+    requireCdeAuth(req, res, () => {
+        const filePath = req.body && req.body.filePath;
+        const target = resolveCdeFilePath(filePath);
+        if (!target) return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+        if (!canUserAccessProject(req.authUser, target.projectName)) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
         }
-        req.authUser = user;
+        if (!canUserUploadInZone(req.authUser, getZoneFromPath(target.key))) {
+            return res.status(403).json({ success: false, error: 'Bạn không có quyền thu hồi tệp trong khu vực này.' });
+        }
+        req.cdeTarget = target;
         next();
-    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    });
 }
 
 // ===============================================================
@@ -515,35 +548,41 @@ app.post('/api/review/save', (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.get('/api/recalls', (req, res) => {
-    try { res.json(readRecallsDB()); } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+app.get('/api/recalls', requireCdeAuth, (req, res) => {
+    try {
+        const recalls = readRecallsDB();
+        res.json(Object.fromEntries(Object.entries(recalls).filter(([filePath]) =>
+            canUserAccessProject(req.authUser, getProjectFromCdePath(filePath))
+        )));
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/recalls/recall', requireUploadPermission, (req, res) => {
     try {
-        const { filePath, reason } = req.body;
+        const { reason } = req.body || {};
+        const target = req.cdeTarget;
         const by = req.authUser.fullName || req.authUser.username;
-        if (!filePath || !reason || !String(reason).trim()) {
+        if (!reason || !String(reason).trim() || String(reason).length > 2000) {
             return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file hoặc lý do thu hồi!' });
         }
-        const key = normRecallKey(filePath);
-        const fullPath = path.join(ROOT_DIR, key.replace(/^database\/bim-vdc\/?/, ''));
-        if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, error: 'Tệp không tồn tại!' });
+        if (!fs.existsSync(target.fullPath) || !fs.statSync(target.fullPath).isFile()) {
+            return res.status(404).json({ success: false, error: 'Tệp không tồn tại!' });
+        }
 
         const db = readRecallsDB();
-        if (db[key]) return res.status(409).json({ success: false, error: 'Tệp này đã được thu hồi trước đó!' });
+        if (db[target.key]) return res.status(409).json({ success: false, error: 'Tệp này đã được thu hồi trước đó!' });
 
-        db[key] = { by, at: new Date().toISOString(), reason: String(reason).trim() };
-        if (writeRecallsDB(db)) res.json({ success: true, message: 'Đã thu hồi tệp!', recall: db[key] });
+        db[target.key] = { by, at: new Date().toISOString(), reason: String(reason).trim() };
+        if (writeRecallsDB(db)) res.json({ success: true, message: 'Đã thu hồi tệp!', recall: db[target.key] });
         else res.status(500).json({ success: false, error: 'Không thể ghi file' });
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 app.post('/api/recalls/restore', requireUploadPermission, (req, res) => {
     try {
-        const { filePath } = req.body;
-        if (!filePath) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file!' });
-        const key = normRecallKey(filePath);
+        const target = req.cdeTarget;
+        if (!target) return res.status(400).json({ success: false, error: 'Thiếu đường dẫn file!' });
+        const key = target.key;
         const db = readRecallsDB();
         if (!db[key]) return res.status(404).json({ success: false, error: 'Tệp này chưa bị thu hồi!' });
         delete db[key];
@@ -1631,16 +1670,38 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/files', requireCdeAuth, (req, res) => {
     try {
-        const subPath = (req.query.path || '').replace(/^database\/bim-vdc\/?/, '');
-        const requestedProject = getProjectFromCdePath(subPath);
+        const requestedPath = String(req.query.path || '').replace(/\\/g, '/')
+            .replace(/^database\/bim-vdc\/?/i, '').replace(/^\/+|\/+$/g, '');
+        const pathSegments = requestedPath ? requestedPath.split('/') : [];
+        if (pathSegments.some(segment => !segment || segment === '.' || segment === '..')) {
+            return res.status(400).json({ error: 'Đường dẫn thư mục không hợp lệ.' });
+        }
+        const subPath = pathSegments.join(path.sep);
+        const requestedProject = pathSegments[0] || '';
         if (requestedProject && !canUserAccessProject(req.authUser, requestedProject)) {
             return res.status(403).json({ error: 'Bạn không được phân công tham gia dự án này.' });
         }
-        const targetDir = path.join(ROOT_DIR, subPath);
+        const targetDir = path.resolve(ROOT_DIR, ...pathSegments);
+        const projectRoot = requestedProject ? path.resolve(ROOT_DIR, requestedProject) : ROOT_DIR;
+        if (requestedProject && targetDir !== projectRoot && !targetDir.startsWith(projectRoot + path.sep)) {
+            return res.status(400).json({ error: 'Đường dẫn thư mục không hợp lệ.' });
+        }
         if (!fs.existsSync(targetDir)) return res.status(404).json({ error: 'Thư mục không tồn tại' });
+        if (!fs.statSync(targetDir).isDirectory()) return res.status(400).json({ error: 'Đường dẫn không phải thư mục.' });
+        if (requestedProject) {
+            const realRoot = fs.realpathSync(ROOT_DIR);
+            const realProject = fs.realpathSync(projectRoot);
+            const realTarget = fs.realpathSync(targetDir);
+            if (!realProject.startsWith(realRoot + path.sep) ||
+                (realTarget !== realProject && !realTarget.startsWith(realProject + path.sep))) {
+                return res.status(400).json({ error: 'Đường dẫn thư mục không hợp lệ.' });
+            }
+        }
         const metadataDB = readFileMetadataDB();
         const items = fs.readdirSync(targetDir, { withFileTypes: true });
-        const visibleItems = items.filter(item => subPath || canUserAccessProject(req.authUser, item.name));
+        const visibleItems = items.filter(item =>
+            requestedProject || !item.isDirectory() || canUserAccessProject(req.authUser, item.name)
+        );
         res.json(visibleItems.map(item => {
             const fullPath = path.join(targetDir, item.name);
             let size = 0;
@@ -1975,6 +2036,35 @@ function updateAssignedProjectNames(oldName, newName) {
 function getProjectFromCdePath(filePath) {
     const parts = String(filePath || '').replace(/\\/g, '/').replace(/^database\/bim-vdc\/?/i, '').split('/');
     return parts[0] || '';
+}
+
+function resolveCdeFilePath(filePath) {
+    if (typeof filePath !== 'string') return null;
+    const relativePath = filePath.replace(/\\/g, '/').replace(/^\/+/, '')
+        .replace(/^database\/bim-vdc\/?/i, '');
+    const segments = relativePath.split('/');
+    if (segments.length < 2 || segments.some(segment => !segment || segment === '.' || segment === '..')) {
+        return null;
+    }
+
+    const projectName = segments[0];
+    const fullPath = path.resolve(ROOT_DIR, ...segments);
+    const projectRoot = path.resolve(ROOT_DIR, projectName);
+    if (!fullPath.startsWith(projectRoot + path.sep)) return null;
+
+    if (fs.existsSync(fullPath) && fs.existsSync(projectRoot)) {
+        const realRoot = fs.realpathSync(ROOT_DIR);
+        const realProject = fs.realpathSync(projectRoot);
+        const realFile = fs.realpathSync(fullPath);
+        if (!realProject.startsWith(realRoot + path.sep) ||
+            !realFile.startsWith(realProject + path.sep)) return null;
+    }
+
+    return {
+        key: `database/bim-vdc/${segments.join('/')}`,
+        projectName,
+        fullPath
+    };
 }
 
 function isValidFolderName(name) {
@@ -2478,7 +2568,34 @@ app.get('/api/progress/photo/:h/:id', (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-app.use('/files', express.static(ROOT_DIR));
+app.use('/files', requireCdeAuth, (req, res, next) => {
+    let segments;
+    try {
+        segments = req.path.split('/').filter(Boolean).map(segment => decodeURIComponent(segment));
+    } catch (error) {
+        return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+    }
+    if (segments.some(segment => !segment || segment === '.' || segment === '..' ||
+        segment.includes('/') || segment.includes('\\'))) {
+        return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+    }
+    const target = resolveCdeFilePath(segments.join('/'));
+    if (!target) return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+    if (!canUserAccessProject(req.authUser, target.projectName)) {
+        return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+    }
+    if (fs.existsSync(target.fullPath)) {
+        const projectRoot = path.resolve(ROOT_DIR, target.projectName);
+        const realRoot = fs.realpathSync(ROOT_DIR);
+        const realProject = fs.realpathSync(projectRoot);
+        const realTarget = fs.realpathSync(target.fullPath);
+        if (!realProject.startsWith(realRoot + path.sep) ||
+            !realTarget.startsWith(realProject + path.sep)) {
+            return res.status(400).json({ success: false, error: 'Đường dẫn tệp không hợp lệ.' });
+        }
+    }
+    next();
+}, express.static(ROOT_DIR));
 
 app.use('/vendor/three', express.static(path.join(__dirname, 'node_modules', 'three')));
 app.use('/vendor/web-ifc', express.static(path.join(__dirname, 'node_modules', 'web-ifc')));
