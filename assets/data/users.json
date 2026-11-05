@@ -25,7 +25,7 @@
     "phone": "0939751194",
     "position": "Giám đốc",
     "discipline": "Kỹ sư",
-    "projects": "Project_01, Project_02",
+    "projects": "@Sample Project, Project_01, Project_02",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -40,7 +40,7 @@
     "phone": "0772194789",
     "position": "Chủ trì thiết kế",
     "discipline": "Kiến trúc sư",
-    "projects": "Project_01",
+    "projects": "@Sample Project, Project 01",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
