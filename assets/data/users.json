@@ -25,7 +25,7 @@
     "phone": "0939751194",
     "position": "Giám đốc",
     "discipline": "Kỹ sư",
-    "projects": "@Sample Project, Project_01, Project_02",
+    "projects": "@Sample Project, Project 101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -40,7 +40,7 @@
     "phone": "0772194789",
     "position": "Chủ trì thiết kế",
     "discipline": "Kiến trúc sư",
-    "projects": "@Sample Project, Project 01",
+    "projects": "@Sample Project, Project 101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -55,7 +55,7 @@
     "phone": "0939123456",
     "position": "Chủ đầu tư",
     "discipline": "",
-    "projects": "Project_02",
+    "projects": "@Sample Project, Project 101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -70,7 +70,7 @@
     "phone": "0772123146",
     "position": "Chỉ huy trưởng",
     "discipline": "Kỹ sư",
-    "projects": "THAY LE NONG",
+    "projects": "@Sample Project, Project 101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -85,7 +85,7 @@
     "phone": "0932836907",
     "position": "Giám đốc tài chính",
     "discipline": "Cử nhân kinh tế",
-    "projects": "PROJECT 01",
+    "projects": "@Sample Project, Project 101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -100,7 +100,7 @@
     "phone": "",
     "position": "Nhân viên",
     "discipline": "Cử nhân kinh tế",
-    "projects": "PROJECT 02",
+    "projects": "@Sample Project, Project 101",
     "company": "PV INCONS CO.LTD",
     "status": "Active"
   },
@@ -115,7 +115,7 @@
     "phone": "",
     "position": "Giám đốc",
     "discipline": "Cử nhân kinh doanh quốc tế",
-    "projects": "PROJECT 03",
+    "projects": "@Sample Project",
     "company": "PV INCONS CO.LTD",
     "status": "Inactive"
   },
@@ -130,7 +130,7 @@
     "phone": "0939 257 429",
     "position": "Giám đốc",
     "discipline": "Thạc sỹ",
-    "projects": "@Sample Project, DHBK_CANTHO",
+    "projects": "@Sample Project, Project 101",
     "company": "TRIỀU PHÁT",
     "status": "Active"
   }
