@@ -89,9 +89,15 @@ async function refreshUsersCache() {
         const users = await response.json();
         if (!Array.isArray(users)) throw new Error(`users.json tại ${USERS_JSON_URL} phải là một mảng JSON.`);
 
+        const serializedUsers = JSON.stringify(users, null, 2);
+        if (fs.existsSync(USERS_CACHE_PATH) &&
+            fs.readFileSync(USERS_CACHE_PATH, 'utf8') === serializedUsers) {
+            return;
+        }
+
         const tmp = `${USERS_CACHE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
         try {
-            fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf8');
+            fs.writeFileSync(tmp, serializedUsers, 'utf8');
             fs.renameSync(tmp, USERS_CACHE_PATH);
         } catch (error) {
             try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
