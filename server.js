@@ -22,12 +22,11 @@ app.set('trust proxy', true);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
-const USERS_JSON_URL = process.env.USERS_JSON_URL;
-const USERS_SYNC_TOKEN = process.env.USERS_SYNC_TOKEN;
+const USERS_JSON_URL = process.env.USERS_JSON_URL;  // URL tải về users.json từ nguồn bên ngoài (ví dụ GitHub) để đồng bộ danh sách người dùng
 
 // Bắt buộc có đủ biến môi trường (thiếu thì dừng server, KHÔNG dùng giá trị mặc định)
 const REQUIRED_ENV = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET'];
-if (IS_PRODUCTION) REQUIRED_ENV.push('SMARTCA_WEBHOOK_TOKEN', 'PUBLIC_API_BASE_URL', 'CORS_ALLOWED_ORIGINS', 'USERS_SYNC_TOKEN');
+if (IS_PRODUCTION) REQUIRED_ENV.push('SMARTCA_WEBHOOK_TOKEN', 'PUBLIC_API_BASE_URL', 'CORS_ALLOWED_ORIGINS');
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k] || !String(process.env[k]).trim());
 if (missingEnv.length) {
     console.error('[PV INCONS SERVER] LỖI CẤU HÌNH: file .env chưa được nạp hoặc thiếu biến:', missingEnv.join(', '));
@@ -78,11 +77,33 @@ if (!fs.existsSync(ROOT_DIR)) {
 }
 
 let usersRefreshPromise = null;
+function writeUsersCache(users) {
+    const serializedUsers = JSON.stringify(users, null, 2);
+    if (fs.existsSync(USERS_CACHE_PATH) &&
+        fs.readFileSync(USERS_CACHE_PATH, 'utf8') === serializedUsers) {
+        return false;
+    }
+
+    const tmp = `${USERS_CACHE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+        fs.writeFileSync(tmp, serializedUsers, 'utf8');
+        fs.renameSync(tmp, USERS_CACHE_PATH);
+        return true;
+    } catch (error) {
+        try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+        throw error;
+    }
+}
+
 async function refreshUsersCache() {
     if (usersRefreshPromise) return usersRefreshPromise;
     usersRefreshPromise = (async () => {
         const response = await fetch(USERS_JSON_URL, {
-            headers: { Accept: 'application/json' },
+            headers: {
+                Accept: 'application/json',
+                'Cache-Control': 'no-cache, no-store, max-age=0',
+                Pragma: 'no-cache'
+            },
             cache: 'no-store',
             signal: AbortSignal.timeout(10000)
         });
@@ -90,20 +111,7 @@ async function refreshUsersCache() {
         const users = await response.json();
         if (!Array.isArray(users)) throw new Error(`users.json tại ${USERS_JSON_URL} phải là một mảng JSON.`);
 
-        const serializedUsers = JSON.stringify(users, null, 2);
-        if (fs.existsSync(USERS_CACHE_PATH) &&
-            fs.readFileSync(USERS_CACHE_PATH, 'utf8') === serializedUsers) {
-            return;
-        }
-
-        const tmp = `${USERS_CACHE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-        try {
-            fs.writeFileSync(tmp, serializedUsers, 'utf8');
-            fs.renameSync(tmp, USERS_CACHE_PATH);
-        } catch (error) {
-            try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
-            throw error;
-        }
+        return writeUsersCache(users);
     })();
     try {
         await usersRefreshPromise;
@@ -111,29 +119,6 @@ async function refreshUsersCache() {
         usersRefreshPromise = null;
     }
 }
-
-app.post('/api/users/refresh', async (req, res) => {
-    if (!USERS_SYNC_TOKEN) {
-        return res.status(503).json({ success: false, error: 'Users sync endpoint is not configured.' });
-    }
-
-    const authorization = req.get('authorization') || '';
-    const match = authorization.match(/^Bearer\s+(.+)$/i);
-    const suppliedToken = Buffer.from(match ? match[1] : '');
-    const expectedToken = Buffer.from(USERS_SYNC_TOKEN);
-    if (suppliedToken.length !== expectedToken.length ||
-        !crypto.timingSafeEqual(suppliedToken, expectedToken)) {
-        return res.status(401).json({ success: false, error: 'Unauthorized.' });
-    }
-
-    try {
-        await refreshUsersCache();
-        return res.json({ success: true });
-    } catch (error) {
-        console.error('[PV INCONS SERVER] Không đồng bộ được users.json theo yêu cầu:', error.message);
-        return res.status(502).json({ success: false, error: 'Không thể tải users.json từ nguồn.' });
-    }
-});
 
 // ===============================================================
 // 3. PROXY CHO REVIT SERVER ADMINISTRATOR
@@ -2635,6 +2620,16 @@ refreshUsersCache().then(() => {
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
         console.log(`[PV INCONS SERVER] Nguồn users.json: ${USERS_JSON_URL}`);
+        setInterval(async () => {
+            try {
+                const changed = await refreshUsersCache();
+                if (changed) {
+                    console.log('[PV INCONS SERVER] Đã cập nhật users cache từ nguồn.');
+                }
+            } catch (error) {
+                console.error('[PV INCONS SERVER] Lỗi kiểm tra users.json định kỳ:', error.message);
+            }
+        }, 30_000);
     });
 }).catch(error => {
     console.error('[PV INCONS SERVER] Không thể khởi động vì không tải được users.json từ frontend:', error.message);
