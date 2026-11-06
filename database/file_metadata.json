@@ -101,8 +101,8 @@
     "description": "Tài liệu lưu trữ",
     "author": "Administrator",
     "createdAt": "2026-11-05T07:50:54.462Z",
-    "updatedAt": "2026-11-05T07:50:54.462Z",
-    "status": "APPROVED",
+    "updatedAt": "2026-11-05T12:43:03.266Z",
+    "status": "REJECTED",
     "suitability": "A2",
     "discipline": "ARC"
   },
@@ -111,7 +111,7 @@
     "description": "Tài liệu lưu trữ hoàn thành",
     "author": "Administrator",
     "createdAt": "2026-11-05T07:51:46.114Z",
-    "updatedAt": "2026-11-05T07:51:46.114Z",
+    "updatedAt": "2026-11-05T12:42:54.573Z",
     "status": "APPROVED",
     "suitability": "A2",
     "discipline": "ARC"
@@ -184,6 +184,16 @@
     "updatedAt": "2026-11-05T09:42:50.983Z",
     "status": "APPROVED",
     "suitability": "S0",
+    "discipline": "ARC"
+  },
+  "database/bim-vdc/@Sample Project/02_SHARED/SAMPLE-PVI-ZZ-ZZ-M3-A-0001.ifc": {
+    "title": "IFC KIẾN TRÚC PHỐI HỢP CLASH DETECTION",
+    "description": "Mô hình 3D kết cấu phối hợp kiểm tra va chạm với các bộ môn khác",
+    "author": "Administrator",
+    "createdAt": "2026-11-06T04:27:34.742Z",
+    "updatedAt": "2026-11-06T04:28:50.315Z",
+    "status": "PENDING",
+    "suitability": "S1",
     "discipline": "ARC"
   }
 }
