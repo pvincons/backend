@@ -22,11 +22,12 @@ app.set('trust proxy', true);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
-const USERS_JSON_URL = process.env.USERS_JSON_URL || 'http://localhost:5500/assets/data/users.json';
+const USERS_JSON_URL = process.env.USERS_JSON_URL;
+const USERS_SYNC_TOKEN = process.env.USERS_SYNC_TOKEN;
 
 // Bắt buộc có đủ biến môi trường (thiếu thì dừng server, KHÔNG dùng giá trị mặc định)
 const REQUIRED_ENV = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET'];
-if (IS_PRODUCTION) REQUIRED_ENV.push('SMARTCA_WEBHOOK_TOKEN', 'PUBLIC_API_BASE_URL', 'CORS_ALLOWED_ORIGINS');
+if (IS_PRODUCTION) REQUIRED_ENV.push('SMARTCA_WEBHOOK_TOKEN', 'PUBLIC_API_BASE_URL', 'CORS_ALLOWED_ORIGINS', 'USERS_SYNC_TOKEN');
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k] || !String(process.env[k]).trim());
 if (missingEnv.length) {
     console.error('[PV INCONS SERVER] LỖI CẤU HÌNH: file .env chưa được nạp hoặc thiếu biến:', missingEnv.join(', '));
@@ -110,6 +111,29 @@ async function refreshUsersCache() {
         usersRefreshPromise = null;
     }
 }
+
+app.post('/api/users/refresh', async (req, res) => {
+    if (!USERS_SYNC_TOKEN) {
+        return res.status(503).json({ success: false, error: 'Users sync endpoint is not configured.' });
+    }
+
+    const authorization = req.get('authorization') || '';
+    const match = authorization.match(/^Bearer\s+(.+)$/i);
+    const suppliedToken = Buffer.from(match ? match[1] : '');
+    const expectedToken = Buffer.from(USERS_SYNC_TOKEN);
+    if (suppliedToken.length !== expectedToken.length ||
+        !crypto.timingSafeEqual(suppliedToken, expectedToken)) {
+        return res.status(401).json({ success: false, error: 'Unauthorized.' });
+    }
+
+    try {
+        await refreshUsersCache();
+        return res.json({ success: true });
+    } catch (error) {
+        console.error('[PV INCONS SERVER] Không đồng bộ được users.json theo yêu cầu:', error.message);
+        return res.status(502).json({ success: false, error: 'Không thể tải users.json từ nguồn.' });
+    }
+});
 
 // ===============================================================
 // 3. PROXY CHO REVIT SERVER ADMINISTRATOR
@@ -2608,12 +2632,6 @@ app.use('/vendor/web-ifc', express.static(path.join(__dirname, 'node_modules', '
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 refreshUsersCache().then(() => {
-    setInterval(() => {
-        refreshUsersCache().catch(error => {
-            console.error('[PV INCONS SERVER] Không đồng bộ được users.json từ frontend:', error.message);
-        });
-    }, 30000).unref();
-
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
         console.log(`[PV INCONS SERVER] Nguồn users.json: ${USERS_JSON_URL}`);
