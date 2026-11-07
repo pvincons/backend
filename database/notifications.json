@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-06T09:11:42.583Z",
+  "notifications": [
+    {
+      "id": "ea530405-e759-44f4-9f7e-c084340cc1ac",
+      "title": "Tích hợp chữ ký số VNPT  SmartCA",
+      "message": "Đã tích hợp chữ ký số vào hệ thống  PV INCONS CDE Master Platform",
+      "icon": "fa-shield-halved",
+      "color": "emerald",
+      "active": true,
+      "createdAt": "2026-11-06T09:04:11.648Z",
+      "updatedAt": "2026-11-06T09:04:11.648Z"
+    },
+    {
+      "id": "730af39a-57da-405c-9326-68b1d02e4e72",
+      "title": "Cập nhật công trình mẫu",
+      "message": "Đã cập nhật 1 công trình mẫu và 1 công trình với các file text định hướng thông tin file tài liệu",
+      "icon": "fa-circle-info",
+      "color": "blue",
+      "active": true,
+      "createdAt": "2026-11-06T09:01:45.372Z",
+      "updatedAt": "2026-11-06T09:01:45.372Z"
+    },
+    {
+      "id": "revit-server-2027",
+      "title": "Máy chủ Revit Server 2027",
+      "message": "Đã kết nối thành công tên miền revit.pvincons.cloud hỗ trợ đồng bộ dữ liệu Central từ xa.",
+      "icon": "fa-server",
+      "color": "blue",
+      "active": true,
+      "createdAt": "2026-11-06T00:00:00.000Z",
+      "updatedAt": ""
+    },
+    {
+      "id": "iso-19650-permissions",
+      "title": "Chuẩn hóa Phân quyền ISO 19650",
+      "message": "Cấu trúc thư mục dự án đã được phân chia theo 4 cấp độ tiêu chuẩn: WIP, Shared, Published và Archive.",
+      "icon": "fa-shield-halved",
+      "color": "emerald",
+      "active": true,
+      "createdAt": "2026-11-06T00:00:00.000Z",
+      "updatedAt": ""
+    }
+  ]
+}
