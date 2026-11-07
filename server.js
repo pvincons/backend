@@ -22,7 +22,6 @@ app.set('trust proxy', true);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
-const USERS_JSON_URL = process.env.USERS_JSON_URL;  // URL tải về users.json từ nguồn bên ngoài (ví dụ GitHub) để đồng bộ danh sách người dùng
 
 // Bắt buộc có đủ biến môi trường (thiếu thì dừng server, KHÔNG dùng giá trị mặc định)
 const REQUIRED_ENV = ['JWT_SECRET', 'VNPT_SMARTCA_BASE_URL', 'VNPT_SMARTCA_CLIENT_ID', 'VNPT_SMARTCA_CLIENT_SECRET'];
@@ -58,11 +57,11 @@ app.use((req, res, next) => {
 // ===============================================================
 // 2. KHỞI TẠO CÁC THƯ MỤC & DỮ LIỆU MẶC ĐỊNH
 // ===============================================================
-const AVATAR_DIR = path.join(__dirname, 'assets', 'data', 'avatar');
-
 // Linh hoạt đường dẫn: Biến môi trường DATABASE_PATH (Production/VPS) hoặc thư mục local
 const BASE_DATABASE_DIR = process.env.DATABASE_PATH || path.join(__dirname, 'database');
-const USERS_CACHE_PATH = path.join(BASE_DATABASE_DIR, 'users-cache.json');
+const USERS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'users.json');
+const NOTIFICATIONS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'notifications.json');
+const AVATAR_DIR = path.join(BASE_DATABASE_DIR, 'avatar');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
 const RECALLS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'recalls.json');
@@ -70,55 +69,65 @@ const PROJECT_DEADLINES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'project-deadli
 
 // Đảm bảo thư mục tồn tại
 fs.mkdirSync(BASE_DATABASE_DIR, { recursive: true });
-if (!fs.existsSync(AVATAR_DIR)) {
-    fs.mkdirSync(AVATAR_DIR, { recursive: true });
-}
-if (!fs.existsSync(ROOT_DIR)) {
-    fs.mkdirSync(ROOT_DIR, { recursive: true });
-}
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
+fs.mkdirSync(ROOT_DIR, { recursive: true });
 
-let usersRefreshPromise = null;
-function writeUsersCache(users) {
-    const serializedUsers = JSON.stringify(users, null, 2);
-    if (fs.existsSync(USERS_CACHE_PATH) &&
-        fs.readFileSync(USERS_CACHE_PATH, 'utf8') === serializedUsers) {
-        return false;
-    }
-
-    const tmp = `${USERS_CACHE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+// Ghi file JSON an toàn: ghi ra file tạm rồi đổi tên, không bao giờ để lại file dở dang
+function writeJsonAtomic(filePath, data) {
+    const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
-        fs.writeFileSync(tmp, serializedUsers, 'utf8');
-        fs.renameSync(tmp, USERS_CACHE_PATH);
-        return true;
+        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+        fs.renameSync(tmp, filePath);
     } catch (error) {
         try { fs.rmSync(tmp, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
         throw error;
     }
 }
 
-async function refreshUsersCache() {
-    if (usersRefreshPromise) return usersRefreshPromise;
-    usersRefreshPromise = (async () => {
-        const response = await fetch(USERS_JSON_URL, {
-            headers: {
-                Accept: 'application/json',
-                'Cache-Control': 'no-cache, no-store, max-age=0',
-                Pragma: 'no-cache'
-            },
-            cache: 'no-store',
-            signal: AbortSignal.timeout(10000)
-        });
-        if (!response.ok) throw new Error(`Không tải được users.json (HTTP ${response.status}) từ ${USERS_JSON_URL}`);
-        const users = await response.json();
-        if (!Array.isArray(users)) throw new Error(`users.json tại ${USERS_JSON_URL} phải là một mảng JSON.`);
+function readUsersFile() {
+    return JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
+}
 
-        return writeUsersCache(users);
-    })();
-    try {
-        await usersRefreshPromise;
-    } finally {
-        usersRefreshPromise = null;
+// Chuyển dữ liệu từ cấu trúc cũ (users-cache.json, assets/data/*) sang thư mục database.
+// Chỉ chạy khi file đích chưa tồn tại nên không bao giờ ghi đè dữ liệu đang dùng.
+(function migrateLegacyData() {
+    const legacyDataDir = path.join(__dirname, 'assets', 'data');
+
+    if (!fs.existsSync(USERS_FILE_PATH)) {
+        const source = [path.join(BASE_DATABASE_DIR, 'users-cache.json'), path.join(legacyDataDir, 'users.json')]
+            .find(candidate => fs.existsSync(candidate));
+        if (source) {
+            fs.copyFileSync(source, USERS_FILE_PATH);
+            console.log(`[PV INCONS SERVER] Đã chuyển ${source} -> ${USERS_FILE_PATH}`);
+        }
     }
+
+    if (!fs.existsSync(NOTIFICATIONS_FILE_PATH)) {
+        const legacyNotifications = path.join(legacyDataDir, 'notifications.json');
+        if (fs.existsSync(legacyNotifications)) {
+            fs.copyFileSync(legacyNotifications, NOTIFICATIONS_FILE_PATH);
+            console.log(`[PV INCONS SERVER] Đã chuyển ${legacyNotifications} -> ${NOTIFICATIONS_FILE_PATH}`);
+        } else {
+            writeJsonAtomic(NOTIFICATIONS_FILE_PATH, { version: 1, updatedAt: new Date().toISOString(), notifications: [] });
+        }
+    }
+
+    const legacyAvatarDir = path.join(legacyDataDir, 'avatar');
+    if (fs.existsSync(legacyAvatarDir) && fs.statSync(legacyAvatarDir).isDirectory()) {
+        for (const name of fs.readdirSync(legacyAvatarDir)) {
+            const from = path.join(legacyAvatarDir, name);
+            const to = path.join(AVATAR_DIR, name);
+            if (fs.statSync(from).isFile() && !fs.existsSync(to)) fs.copyFileSync(from, to);
+        }
+    }
+})();
+
+// users.json là nguồn dữ liệu tài khoản duy nhất, thiếu hoặc hỏng thì dừng server
+try {
+    if (!Array.isArray(readUsersFile())) throw new Error('users.json phải là một mảng JSON.');
+} catch (error) {
+    console.error(`[PV INCONS SERVER] LỖI: không đọc được ${USERS_FILE_PATH}: ${error.message}`);
+    process.exit(1);
 }
 
 // ===============================================================
@@ -150,7 +159,7 @@ app.post('/api/auth/login', (req, res) => {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập đầy đủ tài khoản và mật khẩu!' });
         }
 
-        const data = fs.readFileSync(USERS_CACHE_PATH, 'utf8');
+        const data = fs.readFileSync(USERS_FILE_PATH, 'utf8');
         const users = JSON.parse(data || '[]');
         const user = users.find(u => u.username === username);
 
@@ -226,14 +235,14 @@ app.post('/api/change-password', (req, res) => {
             return res.status(400).json({ success: false, error: 'Vui lòng nhập mật khẩu mới!' });
         }
 
-        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+        const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
         if (!users.some(user => user.username === payload.username)) {
             return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản người dùng trong hệ thống!' });
         }
 
         return res.status(409).json({
             success: false,
-            error: 'Tài khoản được quản lý trên GitHub. Vui lòng đổi mật khẩu qua trang quản trị để cập nhật users.json.'
+            error: 'Tài khoản được quản lý tập trung. Vui lòng đổi mật khẩu qua trang quản trị (Super Admin).'
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -241,21 +250,243 @@ app.post('/api/change-password', (req, res) => {
 });
 
 // ===============================================================
-// 5. API UPLOAD AVATAR NGƯỜI DÙNG
+// 5. API AVATAR NGƯỜI DÙNG (lưu tại database/avatar)
 // ===============================================================
-app.post('/api/upload-avatar', (req, res) => {
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+const AVATAR_TYPES = {
+    'image/png': { ext: 'png', isValid: b => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47 },
+    'image/jpeg': { ext: 'jpg', isValid: b => b.length > 3 && b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF },
+    'image/gif': { ext: 'gif', isValid: b => b.length > 6 && b.toString('latin1', 0, 4) === 'GIF8' },
+    'image/webp': { ext: 'webp', isValid: b => b.length > 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP' }
+};
+
+// Phục vụ ảnh đại diện qua backend. Thẻ <img> không gửi được header Authorization nên route này công khai (giống cách /assets/data/avatar trước đây).
+app.use('/api/avatar', express.static(AVATAR_DIR, {
+    dotfiles: 'deny',
+    index: false,
+    maxAge: '1h',
+    setHeaders: res => res.setHeader('X-Content-Type-Options', 'nosniff')
+}));
+
+// Tên file do server tự đặt theo tài khoản đăng nhập, không nhận tên file từ client
+app.post('/api/upload-avatar', requireCdeAuth, (req, res) => {
     try {
-        const { fileName, image } = req.body;
-        if (!fileName || !image) {
-            return res.status(400).json({ success: false, error: 'Thiếu tên file hoặc dữ liệu ảnh!' });
+        const image = req.body && req.body.image;
+        const comma = typeof image === 'string' ? image.indexOf(',') : -1;
+        const header = comma > 0 ? /^data:(image\/[a-z]+);base64$/i.exec(image.slice(0, comma)) : null;
+        const type = header ? AVATAR_TYPES[header[1].toLowerCase()] : null;
+        if (!type) {
+            return res.status(400).json({ success: false, error: 'Ảnh không hợp lệ. Chỉ hỗ trợ PNG, JPG, WEBP hoặc GIF!' });
         }
 
-        const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
-        const buffer = Buffer.from(base64Data, 'base64');
-        const filePath = path.join(AVATAR_DIR, fileName);
+        const buffer = Buffer.from(image.slice(comma + 1), 'base64');
+        if (!buffer.length || buffer.length > AVATAR_MAX_BYTES) {
+            return res.status(400).json({ success: false, error: 'Kích thước ảnh vượt quá giới hạn 5MB!' });
+        }
+        if (!type.isValid(buffer)) {
+            return res.status(400).json({ success: false, error: 'Nội dung file không phải là ảnh hợp lệ!' });
+        }
 
-        fs.writeFileSync(filePath, buffer);
-        res.json({ success: true, message: 'Tải lên avatar thành công!', path: `assets/data/avatar/${fileName}` });
+        const safeName = String(req.authUser.username).replace(/[^A-Za-z0-9._-]/g, '_');
+        const prefix = `${safeName}_avatar.`;
+        const fileName = `${prefix}${type.ext}`;
+
+        const users = readUsersFile();
+        const user = users.find(u => u.username === req.authUser.username);
+        if (!user) {
+            return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản người dùng trong hệ thống!' });
+        }
+
+        const tmp = path.join(AVATAR_DIR, `.${fileName}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+        fs.writeFileSync(tmp, buffer);
+        fs.renameSync(tmp, path.join(AVATAR_DIR, fileName));
+        // Xóa ảnh cũ của cùng tài khoản nếu khác định dạng (png -> jpg...)
+        fs.readdirSync(AVATAR_DIR)
+            .filter(name => name.startsWith(prefix) && name !== fileName)
+            .forEach(name => fs.rmSync(path.join(AVATAR_DIR, name), { force: true }));
+
+        user.avatarLink = `avatar/${fileName}?v=${Date.now()}`;
+        writeJsonAtomic(USERS_FILE_PATH, users);
+
+        res.json({ success: true, message: 'Tải lên avatar thành công!', path: user.avatarLink, avatarLink: user.avatarLink });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ===============================================================
+// 5.1 API THÔNG BÁO HỆ THỐNG (database/notifications.json)
+// ===============================================================
+const NOTIFICATION_COLORS = ['blue', 'emerald', 'amber', 'purple', 'rose'];
+
+function readNotificationsFile() {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(NOTIFICATIONS_FILE_PATH, 'utf8') || '{}');
+        if (parsed && Array.isArray(parsed.notifications)) return parsed;
+    } catch (error) {
+        console.error('Lỗi đọc notifications.json:', error.message);
+    }
+    return { version: 1, updatedAt: '', notifications: [] };
+}
+
+// Người dùng thường chỉ nhận các thông báo đang bật
+app.get('/api/notifications', requireCdeAuth, (req, res) => {
+    try {
+        const data = readNotificationsFile();
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+            success: true,
+            version: data.version || 1,
+            updatedAt: data.updatedAt || '',
+            notifications: data.notifications.filter(item => item && item.active !== false)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ===============================================================
+// 5.2 API QUẢN TRỊ (Super Admin Portal): đọc/ghi users.json & notifications.json
+// ===============================================================
+const BCRYPT_HASH_RE = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
+const USER_TEXT_FIELDS = ['role', 'permission', 'fullName', 'phone', 'position', 'discipline', 'projects', 'company'];
+
+function isAdminUser(user) {
+    return ['ADMIN'].includes(String(user && user.role || '').toUpperCase()) ||
+        ['ADMIN'].includes(String(user && user.permission || '').toUpperCase());
+}
+
+function requireAdmin(req, res, next) {
+    if (!isAdminUser(req.authUser)) {
+        return res.status(403).json({ success: false, error: 'Chỉ tài khoản ADMIN mới được truy cập Super Admin Portal.' });
+    }
+    next();
+}
+
+// Kiểm tra toàn bộ danh sách trước khi ghi đè users.json. avatarLink do server quản lý (lấy lại từ file hiện tại)
+function validateUsersPayload(input, currentUsers) {
+    if (!Array.isArray(input) || input.length === 0 || input.length > 2000) {
+        return { error: 'Danh sách tài khoản phải là một mảng có từ 1 đến 2000 phần tử.' };
+    }
+    const currentById = new Map(currentUsers.map(u => [Number(u.id), u]));
+    const ids = new Set();
+    const usernames = new Set();
+    const result = [];
+
+    for (let i = 0; i < input.length; i++) {
+        const raw = input[i];
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            return { error: `Tài khoản thứ ${i + 1} không hợp lệ.` };
+        }
+        const id = Number(raw.id);
+        if (!Number.isInteger(id) || id <= 0) return { error: `Tài khoản thứ ${i + 1} có ID không hợp lệ.` };
+        if (ids.has(id)) return { error: `ID ${id} bị trùng.` };
+        ids.add(id);
+
+        const username = typeof raw.username === 'string' ? raw.username.trim() : '';
+        if (!username || username.length > 64) return { error: `Tài khoản có ID ${id} thiếu hoặc sai username.` };
+        if (usernames.has(username.toLowerCase())) return { error: `Username "${username}" bị trùng.` };
+        usernames.add(username.toLowerCase());
+
+        if (typeof raw.passwordHash !== 'string' || !BCRYPT_HASH_RE.test(raw.passwordHash)) {
+            return { error: `Mật khẩu của "${username}" không đúng định dạng bcrypt.` };
+        }
+
+        const user = { ...raw, id, username };
+        USER_TEXT_FIELDS.forEach(field => { user[field] = raw[field] == null ? '' : String(raw[field]); });
+        if (!user.role.trim()) return { error: `Tài khoản "${username}" chưa có vai trò (role).` };
+        user.status = (raw.status === 'Active' || raw.status === 'Đang triển khai') ? 'Active' : 'Inactive';
+
+        const previous = currentById.get(id);
+        user.avatarLink = previous && typeof previous.avatarLink === 'string' ? previous.avatarLink : '';
+        result.push(user);
+    }
+
+    if (!result.some(u => u.status === 'Active' && isAdminUser(u))) {
+        return { error: 'Phải còn ít nhất một tài khoản ADMIN đang hoạt động.' };
+    }
+    return { users: result };
+}
+
+function validateNotificationsPayload(input) {
+    if (!Array.isArray(input) || input.length > 500) {
+        return { error: 'Danh sách thông báo phải là một mảng tối đa 500 phần tử.' };
+    }
+    const ids = new Set();
+    const result = [];
+    for (let i = 0; i < input.length; i++) {
+        const raw = input[i];
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `Thông báo thứ ${i + 1} không hợp lệ.` };
+
+        const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+        if (!id || id.length > 100) return { error: `Thông báo thứ ${i + 1} thiếu hoặc sai ID.` };
+        if (ids.has(id)) return { error: `ID thông báo "${id}" bị trùng.` };
+        ids.add(id);
+
+        const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+        const message = typeof raw.message === 'string' ? raw.message.trim() : '';
+        if (!title || title.length > 200) return { error: `Thông báo "${id}" thiếu hoặc quá dài tiêu đề (tối đa 200 ký tự).` };
+        if (!message || message.length > 5000) return { error: `Thông báo "${id}" thiếu hoặc quá dài nội dung (tối đa 5000 ký tự).` };
+
+        const createdAt = Number.isNaN(Date.parse(raw.createdAt)) ? new Date().toISOString() : String(raw.createdAt);
+        const item = {
+            id,
+            title,
+            message,
+            icon: /^fa-[a-z0-9-]+$/.test(raw.icon || '') ? raw.icon : 'fa-circle-info',
+            color: NOTIFICATION_COLORS.includes(raw.color) ? raw.color : 'blue',
+            active: raw.active !== false,
+            createdAt
+        };
+        if (raw.updatedAt && !Number.isNaN(Date.parse(raw.updatedAt))) item.updatedAt = String(raw.updatedAt);
+        result.push(item);
+    }
+    return { notifications: result };
+}
+
+app.get('/api/admin/users', requireCdeAuth, requireAdmin, (req, res) => {
+    try {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ success: true, users: readUsersFile() });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.put('/api/admin/users', requireCdeAuth, requireAdmin, (req, res) => {
+    try {
+        const checked = validateUsersPayload(req.body && req.body.users, readUsersFile());
+        if (checked.error) return res.status(400).json({ success: false, error: checked.error });
+
+        // Giữ lại một bản sao lưu gần nhất trước khi ghi đè (trước đây lịch sử commit GitHub đóng vai trò này)
+        fs.copyFileSync(USERS_FILE_PATH, `${USERS_FILE_PATH}.bak`);
+        writeJsonAtomic(USERS_FILE_PATH, checked.users);
+        console.log(`[PV INCONS SERVER] ${req.authUser.username} đã cập nhật users.json (${checked.users.length} tài khoản).`);
+        res.json({ success: true, count: checked.users.length, users: checked.users });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/admin/notifications', requireCdeAuth, requireAdmin, (req, res) => {
+    try {
+        const data = readNotificationsFile();
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ success: true, version: data.version || 1, updatedAt: data.updatedAt || '', notifications: data.notifications });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.put('/api/admin/notifications', requireCdeAuth, requireAdmin, (req, res) => {
+    try {
+        const checked = validateNotificationsPayload(req.body && req.body.notifications);
+        if (checked.error) return res.status(400).json({ success: false, error: checked.error });
+
+        const data = { version: 1, updatedAt: new Date().toISOString(), notifications: checked.notifications };
+        writeJsonAtomic(NOTIFICATIONS_FILE_PATH, data);
+        console.log(`[PV INCONS SERVER] ${req.authUser.username} đã cập nhật notifications.json (${checked.notifications.length} thông báo).`);
+        res.json({ success: true, count: checked.notifications.length, updatedAt: data.updatedAt });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -517,7 +748,7 @@ app.post('/api/review/save', (req, res) => {
         try { payload = jwt.verify(token, JWT_SECRET); }
         catch (e) { return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn, vui lòng đăng nhập lại!' }); }
 
-        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+        const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
         const user = users.find(u => u.username === payload.username);
         if (!user || user.status === 'Inactive') return res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' });
 
@@ -1064,7 +1295,7 @@ function requireCdeAuth(req, res, next) {
             return res.status(401).json({ success: false, error: 'Bạn chưa đăng nhập hoặc phiên đã hết hạn!' });
         }
         const payload = jwt.verify(token, JWT_SECRET);
-        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+        const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
         const user = users.find(u => u.username === payload.username);
         if (!user || user.status === 'Inactive') {
             return res.status(401).json({ success: false, error: 'Tài khoản không hợp lệ hoặc đã bị khóa!' });
@@ -2084,7 +2315,7 @@ function authorizeManagedFolderOperation(req, res, itemPath, allowProjectRoot = 
         }
         try {
             const payload = jwt.verify(token, JWT_SECRET);
-            const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+            const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
             user = users.find(candidate => candidate.username === payload.username && candidate.status !== 'Inactive');
         } catch (error) {
             res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' });
@@ -2133,7 +2364,7 @@ function canUserAccessProject(user, projectName) {
 function hasAssignedProject(projectName) {
     const normalize = value => String(value || '').replace(/\s+/g, '_').toLowerCase();
     const projectKey = normalize(projectName);
-    const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+    const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
     return users.some(user => typeof user.projects === 'string' &&
         user.projects.split(',').some(project => normalize(project.trim()) === projectKey));
 }
@@ -2340,7 +2571,7 @@ function saveChatMessages() {
 function findChatUser(username) {
     if (!username || typeof username !== 'string') return null;
     try {
-        const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8'));
+        const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8'));
         const u = users.find(x => x.username === username);
         if (!u) return null;
         return {
@@ -2498,7 +2729,7 @@ function progAuth(req, res) {
     let payload;
     try { payload = jwt.verify(token, JWT_SECRET); }
     catch (e) { res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn!' }); return null; }
-    const users = JSON.parse(fs.readFileSync(USERS_CACHE_PATH, 'utf8') || '[]');
+    const users = JSON.parse(fs.readFileSync(USERS_FILE_PATH, 'utf8') || '[]');
     const user = users.find(u => u.username === payload.username);
     if (!user || user.status === 'Inactive') { res.status(401).json({ success: false, error: 'Tài khoản không tồn tại hoặc đã bị khóa!' }); return null; }
     return user;
@@ -2711,22 +2942,9 @@ app.use('/vendor/web-ifc', express.static(path.join(__dirname, 'node_modules', '
 });
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
-refreshUsersCache().then(() => {
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
-        console.log(`[PV INCONS SERVER] Nguồn users.json: ${USERS_JSON_URL}`);
-        setInterval(async () => {
-            try {
-                const changed = await refreshUsersCache();
-                if (changed) {
-                    console.log('[PV INCONS SERVER] Đã cập nhật users cache từ nguồn.');
-                }
-            } catch (error) {
-                console.error('[PV INCONS SERVER] Lỗi kiểm tra users.json định kỳ:', error.message);
-            }
-        }, 30_000);
-    });
-}).catch(error => {
-    console.error('[PV INCONS SERVER] Không thể khởi động vì không tải được users.json từ frontend:', error.message);
-    process.exit(1);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 PV INCONS Server đã khởi động hoàn chỉnh tại cổng ${PORT}`);
+    console.log(`[PV INCONS SERVER] Dữ liệu tài khoản: ${USERS_FILE_PATH}`);
+    console.log(`[PV INCONS SERVER] Dữ liệu thông báo: ${NOTIFICATIONS_FILE_PATH}`);
+    console.log(`[PV INCONS SERVER] Thư mục avatar: ${AVATAR_DIR}`);
 });

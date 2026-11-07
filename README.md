@@ -6,4 +6,19 @@ Cài đặt trên server: Kết nối vào terminal của server và chạy lệ
 Nếu dùng package-lock.json: Chạy lệnh npm ci (lệnh này giúp cài đặt chính xác 100% các phiên bản gói như lúc bạn code ở máy local, rất an toàn cho môi trường production).
 Hoặc chạy lệnh: npm install (hoặc npm install --production nếu bạn muốn bỏ qua các thư viện chỉ dùng cho việc dev/test).
 
-Mặc định backend đọc `http://localhost:5500/assets/data/users.json`, kể cả khi `NODE_ENV=production`. Trên server production, cần đặt biến môi trường `USERS_JSON_URL=https://pvincons.cloud/assets/data/users.json` (hoặc URL public chính xác của file frontend). Backend làm mới cache nội bộ mỗi 30 giây. Khi URL chưa tải được lúc khởi động, backend sẽ báo lỗi và không chạy. Thay đổi tài khoản/mật khẩu thực hiện qua trang quản trị để xuất bản lên repo frontend; API đổi mật khẩu và đổi tên thư mục gốc project không ghi vào cache backend.
+Dữ liệu tài khoản, thông báo và ảnh đại diện nằm trong thư mục `database/` và chạy cùng backend `server.js` (đổi vị trí bằng biến môi trường `DATABASE_PATH`):
+- `database/users.json`: danh sách tài khoản (bắt buộc phải có, thiếu hoặc hỏng thì backend không khởi động).
+- `database/notifications.json`: thông báo hệ thống (tự tạo file rỗng nếu chưa có).
+- `database/avatar/`: ảnh đại diện, tên file dạng `<username>_avatar.<png|jpg|webp|gif>`.
+
+Không còn đồng bộ từ GitHub, biến môi trường `USERS_JSON_URL` không còn được sử dụng.
+
+API liên quan:
+- `GET /api/notifications` (cần đăng nhập): thông báo đang bật, dùng cho chuông thông báo.
+- `POST /api/upload-avatar` (cần đăng nhập): lưu ảnh của chính tài khoản đang đăng nhập và cập nhật `avatarLink` trong `users.json`.
+- `GET /api/avatar/<file>`: phục vụ ảnh đại diện.
+- `GET/PUT /api/admin/users` và `GET/PUT /api/admin/notifications` (chỉ ADMIN): dùng cho Super Admin Portal (`admin/index.html`). Mỗi lần ghi `users.json` backend giữ bản sao lưu gần nhất ở `database/users.json.bak`.
+
+Khi nâng cấp từ cấu trúc cũ, lần chạy đầu tiên backend tự chuyển `users-cache.json`, `assets/data/notifications.json` và `assets/data/avatar/*` sang `database/` nếu file đích chưa tồn tại.
+
+Đổi mật khẩu hoặc cập nhật tài khoản thực hiện qua trang quản trị (Super Admin Portal); API `/api/change-password` vẫn từ chối đổi trực tiếp.
