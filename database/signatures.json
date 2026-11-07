@@ -1,1 +1,56 @@
-{}
+{
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-STR-ZZ-ZZ-DR-S-0001.pdf": {
+    "filePath": "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-STR-ZZ-ZZ-DR-S-0001.pdf",
+    "fileName": "SAMPLE-STR-ZZ-ZZ-DR-S-0001.pdf",
+    "signatures": [
+      {
+        "tranId": "3a8e877a-c89b-4489-99c5-b1068e56c1ea",
+        "signedBy": "TRẦN HOÀNG PHƯỚC",
+        "signerName": "TRẦN HOÀNG PHƯỚC",
+        "certSerial": "54010101a6603fd5476d8f52e709d184",
+        "signedAt": "2026-11-07T09:22:46.106Z",
+        "embedded": true,
+        "mode": "pdf-embed"
+      }
+    ],
+    "signatureCount": 1,
+    "signedBy": "TRẦN HOÀNG PHƯỚC",
+    "signedAt": "2026-11-07T09:22:46.106Z"
+  },
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-ARC-ZZ-ZZ-DR-A-0001.pdf": {
+    "filePath": "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-ARC-ZZ-ZZ-DR-A-0001.pdf",
+    "fileName": "SAMPLE-ARC-ZZ-ZZ-DR-A-0001.pdf",
+    "signatures": [
+      {
+        "tranId": "65d4f70a-b415-4bd2-92b9-8227eae1a45f",
+        "signedBy": "TRẦN HOÀNG PHƯỚC",
+        "signerName": "TRẦN HOÀNG PHƯỚC",
+        "certSerial": "54010101a6603fd5476d8f52e709d184",
+        "signedAt": "2026-11-07T09:23:54.670Z",
+        "embedded": true,
+        "mode": "pdf-embed"
+      }
+    ],
+    "signatureCount": 1,
+    "signedBy": "TRẦN HOÀNG PHƯỚC",
+    "signedAt": "2026-11-07T09:23:54.670Z"
+  },
+  "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-PVI-ZZ-ZZ-RP-G-0001.pdf": {
+    "filePath": "database/bim-vdc/@Sample Project/03_PUBLISHED/SAMPLE-PVI-ZZ-ZZ-RP-G-0001.pdf",
+    "fileName": "SAMPLE-PVI-ZZ-ZZ-RP-G-0001.pdf",
+    "signatures": [
+      {
+        "tranId": "047e3011-764f-4f0e-8aaa-5d0a6ee4b4b3",
+        "signedBy": "TRẦN HOÀNG PHƯỚC",
+        "signerName": "TRẦN HOÀNG PHƯỚC",
+        "certSerial": "54010101a6603fd5476d8f52e709d184",
+        "signedAt": "2026-11-07T09:24:13.348Z",
+        "embedded": true,
+        "mode": "pdf-embed"
+      }
+    ],
+    "signatureCount": 1,
+    "signedBy": "TRẦN HOÀNG PHƯỚC",
+    "signedAt": "2026-11-07T09:24:13.348Z"
+  }
+}

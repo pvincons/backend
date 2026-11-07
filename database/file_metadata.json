@@ -61,7 +61,7 @@
     "description": "Bản vẽ kết cấu hoàn thành đã được các bên kiểm duyệt và ký số xác thực",
     "author": "Administrator",
     "createdAt": "2026-11-05T07:34:24.464Z",
-    "updatedAt": "2026-11-05T07:34:24.464Z",
+    "updatedAt": "2026-11-07T09:22:46.131Z",
     "status": "APPROVED",
     "suitability": "S4",
     "discipline": "STR"
@@ -71,7 +71,7 @@
     "description": "Bản vẽ kiến trúc hoàn thành đã được các bên kiểm duyệt và ký số xác thực",
     "author": "Administrator",
     "createdAt": "2026-11-05T07:33:51.976Z",
-    "updatedAt": "2026-11-05T07:53:21.043Z",
+    "updatedAt": "2026-11-07T09:23:54.677Z",
     "status": "APPROVED",
     "suitability": "S4",
     "discipline": "ARC"
@@ -91,7 +91,7 @@
     "description": "Quy trình trình mẫu (Material Submittal), thử nghiệm nghiệm thu (Lab testing) và kiểm soát chất lượng đầu vào tại công trường.",
     "author": "Administrator",
     "createdAt": "2026-11-05T07:44:49.362Z",
-    "updatedAt": "2026-11-05T07:46:14.853Z",
+    "updatedAt": "2026-11-07T09:24:13.354Z",
     "status": "APPROVED",
     "suitability": "S0",
     "discipline": "ARC"
