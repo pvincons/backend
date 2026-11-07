@@ -66,6 +66,7 @@ const USERS_CACHE_PATH = path.join(BASE_DATABASE_DIR, 'users-cache.json');
 const ROOT_DIR = path.join(BASE_DATABASE_DIR, 'bim-vdc');
 const ISSUES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'issues.json');
 const RECALLS_FILE_PATH = path.join(BASE_DATABASE_DIR, 'recalls.json');
+const PROJECT_DEADLINES_FILE_PATH = path.join(BASE_DATABASE_DIR, 'project-deadlines.json');
 
 // Đảm bảo thư mục tồn tại
 fs.mkdirSync(BASE_DATABASE_DIR, { recursive: true });
@@ -585,6 +586,100 @@ app.get('/api/recalls', requireCdeAuth, (req, res) => {
             canUserAccessProject(req.authUser, getProjectFromCdePath(filePath))
         )));
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+function readProjectDeadlinesDB() {
+    if (!fs.existsSync(PROJECT_DEADLINES_FILE_PATH)) return {};
+    const data = JSON.parse(fs.readFileSync(PROJECT_DEADLINES_FILE_PATH, 'utf8') || '{}');
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('Dữ liệu deadline dự án không đúng định dạng.');
+    }
+    return data;
+}
+
+function writeProjectDeadlinesDB(data) {
+    const tempPath = `${PROJECT_DEADLINES_FILE_PATH}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+        fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf8');
+        fs.renameSync(tempPath, PROJECT_DEADLINES_FILE_PATH);
+    } catch (error) {
+        try { fs.rmSync(tempPath, { force: true }); } catch (cleanupError) { /* preserve the write error */ }
+        throw error;
+    }
+}
+
+function canManageProjectDeadline(user) {
+    const role = String(user.role || '').toUpperCase();
+    const permission = String(user.permission || role).toUpperCase();
+    return ['ADMIN', 'MASTER'].includes(role) || ['ADMIN', 'MASTER'].includes(permission);
+}
+
+function isValidProjectDeadlineDate(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function resolveDeadlineProject(projectName) {
+    if (!isValidFolderName(projectName)) return null;
+    const rootPath = path.resolve(ROOT_DIR);
+    const projectPath = path.resolve(rootPath, projectName.trim());
+    if (path.dirname(projectPath) !== rootPath ||
+        !fs.existsSync(projectPath) ||
+        !fs.statSync(projectPath).isDirectory()) {
+        return null;
+    }
+    return projectName.trim();
+}
+
+app.get('/api/project-deadline', requireCdeAuth, (req, res) => {
+    try {
+        const projectName = resolveDeadlineProject(req.query.projectName);
+        if (!projectName) return res.status(404).json({ success: false, error: 'Không tìm thấy dự án.' });
+        if (!canUserAccessProject(req.authUser, projectName)) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+        }
+        const deadlines = readProjectDeadlinesDB();
+        res.json({ success: true, projectName, deadline: deadlines[projectName] || null });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.put('/api/project-deadline', requireCdeAuth, (req, res) => {
+    try {
+        if (!canManageProjectDeadline(req.authUser)) {
+            return res.status(403).json({ success: false, error: 'Chỉ Admin hoặc Master mới được cập nhật deadline dự án.' });
+        }
+        const { projectName, startDate, endDate, completed } = req.body || {};
+        const validProjectName = resolveDeadlineProject(projectName);
+        if (!validProjectName) return res.status(404).json({ success: false, error: 'Không tìm thấy dự án.' });
+        if (!canUserAccessProject(req.authUser, validProjectName)) {
+            return res.status(403).json({ success: false, error: 'Bạn không được phân công tham gia dự án này.' });
+        }
+        if (!isValidProjectDeadlineDate(startDate) || !isValidProjectDeadlineDate(endDate)) {
+            return res.status(400).json({ success: false, error: 'Vui lòng nhập ngày bắt đầu và ngày kết thúc hợp lệ.' });
+        }
+        if (endDate < startDate) {
+            return res.status(400).json({ success: false, error: 'Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.' });
+        }
+        if (completed !== undefined && typeof completed !== 'boolean') {
+            return res.status(400).json({ success: false, error: 'Trạng thái hoàn thành không hợp lệ.' });
+        }
+
+        const deadlines = readProjectDeadlinesDB();
+        deadlines[validProjectName] = {
+            startDate,
+            endDate,
+            completed: completed === true,
+            updatedAt: new Date().toISOString(),
+            updatedBy: req.authUser.username
+        };
+        writeProjectDeadlinesDB(deadlines);
+        res.json({ success: true, projectName: validProjectName, deadline: deadlines[validProjectName] });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 app.post('/api/recalls/recall', requireUploadPermission, (req, res) => {
